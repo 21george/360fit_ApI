@@ -168,17 +168,23 @@ class WorkoutPlanController
     // POST /workout-plans/:id/assign - Assign plan to client(s)
     public function assign(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $planId = new ObjectId($params['id']);
+        try {
+            $coachId = new ObjectId($params['_auth']['sub']);
+            $planId  = new ObjectId($params['id']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid plan ID', 400);
+            return;
+        }
+
         $body = Request::body();
 
         // Find plan
         $plan = Database::collection('workout_plans')->findOne([
-            '_id' => $planId,
+            '_id'      => $planId,
             'coach_id' => $coachId,
         ]);
         if (!$plan) {
-            Response::error('Plan not found', 404);
+            Response::error('Plan not found or access denied', 404);
             return;
         }
 
@@ -197,14 +203,23 @@ class WorkoutPlanController
         // Validate all clients exist and belong to coach
         $clientObjects = [];
         foreach ($clientIds as $id) {
-            $clientId = $id instanceof ObjectId ? $id : new ObjectId((string) $id);
+            try {
+                $clientId = $id instanceof ObjectId ? $id : new ObjectId((string) $id);
+            } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+                Response::error('Invalid client ID: ' . (string) $id, 400);
+                return;
+            }
+
             $client = Database::collection('clients')->findOne([
-                '_id' => $clientId,
+                '_id'      => $clientId,
                 'coach_id' => $coachId,
-                'active' => true,
             ]);
             if (!$client) {
                 Response::error('Client not found: ' . (string) $id, 404);
+                return;
+            }
+            if (!($client['active'] ?? true)) {
+                Response::error('Client is inactive: ' . (string) $id, 422);
                 return;
             }
             $clientObjects[] = $client;
@@ -257,28 +272,21 @@ class WorkoutPlanController
         $page    = max(1, (int) Request::get('page', 1));
         $perPage = 20;
 
-        // Find plans with no client assigned (draft or saved status)
-        $filter = [
-            'coach_id'   => $coachId,
-            'client_id'   => null,
-            'client_ids'  => ['$in' => [[]], '$exists' => true],
-            'status'      => ['$in' => ['draft', 'saved']],
-        ];
-
-        // Alternative: find plans where client_id is null and client_ids is empty or missing
-        $col   = Database::collection('workout_plans');
+        $col    = Database::collection('workout_plans');
         $filter = [
             'coach_id' => $coachId,
-            '$or' => [
-                [
-                    'client_id' => null,
-                    'status' => ['$in' => ['draft', 'saved']],
-                ],
-                [
-                    'client_id' => ['$exists' => false],
-                    'status' => ['$in' => ['draft', 'saved']],
-                ],
+            '$and' => [
+                ['$or' => [
+                    ['client_id' => null],
+                    ['client_id' => ['$exists' => false]],
+                ]],
+                ['$or' => [
+                    ['client_ids' => ['$size' => 0]],
+                    ['client_ids' => ['$exists' => false]],
+                    ['client_ids' => []],
+                ]],
             ],
+            'status' => ['$in' => ['draft', 'saved']],
         ];
 
         $total = $col->countDocuments($filter);
