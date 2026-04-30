@@ -313,6 +313,79 @@ class NotificationTriggerService
     }
 
     /**
+     * Notify client when coach sends them a message
+     */
+    public function notifyClientNewMessage(string $coachName, string $coachId, string $clientId, ?string $messageId = null): void
+    {
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'new_message',
+            'title'      => 'New Message',
+            'body'       => "New message from {$coachName}",
+            'data'       => [
+                'coachId'   => $coachId,
+                'coachName' => $coachName,
+                'messageId' => $messageId,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify client when a new workout plan is assigned to them
+     */
+    public function notifyClientNewPlan(string $planTitle, string $planId, string $clientId): void
+    {
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'new_workout_plan',
+            'title'      => 'New Workout Plan',
+            'body'       => "Your new workout plan \"{$planTitle}\" is ready!",
+            'data'       => [
+                'planId'    => $planId,
+                'planTitle' => $planTitle,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify client when their assigned workout plan is updated
+     */
+    public function notifyClientPlanUpdated(string $planTitle, string $planId, string $clientId): void
+    {
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'workout_plan_updated',
+            'title'      => 'Workout Plan Updated',
+            'body'       => "Your workout plan \"{$planTitle}\" has been updated.",
+            'data'       => [
+                'planId'    => $planId,
+                'planTitle' => $planTitle,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
      * Helper: Get coach by client ID
      */
     private function getCoachByClientId(string $clientId): ?array

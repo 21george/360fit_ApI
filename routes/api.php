@@ -158,3 +158,9 @@ $router->post('/subscription/webhook', [SubscriptionController::class, 'webhook'
 
 // ─── Notifications ──────────────────────────────────────────────────────────────
 require_once BASE_PATH . '/routes/notifications.php';
+
+// ─── Client: Notifications ────────────────────────────────────────────────────
+$router->get('/client/notifications',               [NotificationsController::class, 'clientIndex'],       [ClientMiddleware::class]);
+$router->get('/client/notifications/unread-count',  [NotificationsController::class, 'clientUnreadCount'], [ClientMiddleware::class]);
+$router->post('/client/notifications/:id/read',     [NotificationsController::class, 'clientMarkRead'],    [ClientMiddleware::class]);
+$router->post('/client/notifications/read-all',     [NotificationsController::class, 'clientMarkAllRead'], [ClientMiddleware::class]);

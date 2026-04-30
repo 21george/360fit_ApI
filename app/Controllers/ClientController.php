@@ -76,10 +76,23 @@ class ClientController
         $errors = Request::validate($body, ['profile_photo_url' => 'required']);
         if ($errors) Response::error('Validation failed', 422, $errors);
 
+        $url = trim((string) $body['profile_photo_url']);
+        // Validate URL format and scheme
+        if (!filter_var($url, FILTER_VALIDATE_URL)) {
+            Response::error('Invalid photo URL format', 422);
+            return;
+        }
+        $parsed = parse_url($url);
+        $scheme = $parsed['scheme'] ?? '';
+        if (!in_array(strtolower($scheme), ['http', 'https'], true)) {
+            Response::error('Photo URL must use HTTP or HTTPS', 422);
+            return;
+        }
+
         Database::collection('clients')->updateOne(
             ['_id' => $clientId, 'active' => true],
             ['$set' => [
-                'profile_photo_url' => $body['profile_photo_url'],
+                'profile_photo_url' => $url,
                 'updated_at' => new \MongoDB\BSON\UTCDateTime(),
             ]]
         );

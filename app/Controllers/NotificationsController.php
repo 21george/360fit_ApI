@@ -10,12 +10,140 @@ use MongoDB\BSON\ObjectId;
 class NotificationsController
 {
     /**
+     * GET /client/notifications
+     * List the authenticated client's own notifications
+     */
+    public function clientIndex(array $params): void
+    {
+        try {
+            $clientId = new ObjectId($params['_auth']['sub']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid user id', 400);
+            return;
+        }
+
+        $collection = Database::collection('notifications');
+
+        $page       = max(1, (int) Request::get('page', 1));
+        $perPage    = 20;
+        $type       = Request::get('type');
+        $unreadOnly = Request::get('unread') === 'true';
+
+        $filter = ['user_id' => $clientId, 'user_type' => 'client'];
+        if (is_string($type) && $type !== '') {
+            $filter['type'] = $type;
+        }
+        if ($unreadOnly) {
+            $filter['read'] = false;
+        }
+
+        $total = $collection->countDocuments($filter);
+        $docs  = $collection->find($filter, [
+            'skip'  => ($page - 1) * $perPage,
+            'limit' => $perPage,
+            'sort'  => ['sent_at' => -1],
+        ]);
+
+        $notifications = [];
+        foreach ($docs as $doc) {
+            $notifications[] = $this->format($doc);
+        }
+
+        Response::paginated($notifications, $total, $page, $perPage);
+    }
+
+    /**
+     * GET /client/notifications/unread-count
+     */
+    public function clientUnreadCount(array $params): void
+    {
+        try {
+            $clientId   = new ObjectId($params['_auth']['sub']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid user id', 400);
+            return;
+        }
+
+        $collection = Database::collection('notifications');
+
+        $count = $collection->countDocuments([
+            'user_id'   => $clientId,
+            'user_type' => 'client',
+            'read'      => false,
+        ]);
+
+        Response::success(['count' => $count]);
+    }
+
+    /**
+     * POST /client/notifications/:id/read
+     */
+    public function clientMarkRead(array $params): void
+    {
+        try {
+            $clientId       = new ObjectId($params['_auth']['sub']);
+            $notificationId = new ObjectId($params['id']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid ID', 400);
+            return;
+        }
+
+        $collection     = Database::collection('notifications');
+
+        $notification = $collection->findOne([
+            '_id'       => $notificationId,
+            'user_id'   => $clientId,
+            'user_type' => 'client',
+        ]);
+
+        if (!$notification) {
+            Response::error('Notification not found', 404);
+            return;
+        }
+
+        $collection->updateOne(
+            ['_id' => $notificationId],
+            ['$set' => ['read' => true]]
+        );
+
+        Response::success(null, 'Notification marked as read');
+    }
+
+    /**
+     * POST /client/notifications/read-all
+     */
+    public function clientMarkAllRead(array $params): void
+    {
+        try {
+            $clientId   = new ObjectId($params['_auth']['sub']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid user id', 400);
+            return;
+        }
+
+        $collection = Database::collection('notifications');
+
+        $result = $collection->updateMany(
+            ['user_id' => $clientId, 'user_type' => 'client', 'read' => false],
+            ['$set' => ['read' => true]]
+        );
+
+        Response::success(['marked' => $result->getModifiedCount()], 'All notifications marked as read');
+    }
+
+    /**
      * GET /notifications
      * List coach's notifications with pagination and optional filtering
      */
     public function index(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        try {
+            $coachId = new ObjectId($params['_auth']['sub']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid user id', 400);
+            return;
+        }
+
         $collection = Database::collection('notifications');
 
         $page = max(1, (int) Request::get('page', 1));
@@ -24,7 +152,7 @@ class NotificationsController
         $unreadOnly = Request::get('unread') === 'true';
 
         $filter = ['user_id' => $coachId];
-        if ($type) {
+        if (is_string($type) && $type !== '') {
             $filter['type'] = $type;
         }
         if ($unreadOnly) {
@@ -52,7 +180,13 @@ class NotificationsController
      */
     public function unreadCount(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        try {
+            $coachId = new ObjectId($params['_auth']['sub']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid user id', 400);
+            return;
+        }
+
         $collection = Database::collection('notifications');
 
         $count = $collection->countDocuments([
@@ -69,7 +203,13 @@ class NotificationsController
      */
     public function markRead(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        try {
+            $coachId = new ObjectId($params['_auth']['sub']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid user id', 400);
+            return;
+        }
+
         $notificationId = new ObjectId($params['id']);
         $collection = Database::collection('notifications');
 
@@ -97,7 +237,13 @@ class NotificationsController
      */
     public function markAllRead(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        try {
+            $coachId = new ObjectId($params['_auth']['sub']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid user id', 400);
+            return;
+        }
+
         $collection = Database::collection('notifications');
 
         $result = $collection->updateMany(
@@ -114,7 +260,13 @@ class NotificationsController
      */
     public function destroy(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        try {
+            $coachId = new ObjectId($params['_auth']['sub']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid user id', 400);
+            return;
+        }
+
         $notificationId = new ObjectId($params['id']);
         $collection = Database::collection('notifications');
 

@@ -33,6 +33,8 @@ class MediaController
         }
     }
 
+    private const ALLOWED_UPLOAD_TYPES = ['photo', 'video', 'document'];
+
     // POST /client/media/upload  (local file upload fallback)
     public function uploadFile(array $params): void
     {
@@ -44,11 +46,25 @@ class MediaController
 
         $file = $_FILES['file'];
         $type = $_GET['type'] ?? $_POST['type'] ?? 'photo';
+        // Prevent path traversal: whitelist and sanitize the type parameter
+        if (!is_string($type) || !in_array($type, self::ALLOWED_UPLOAD_TYPES, true)) {
+            Response::error('Invalid upload type', 422);
+        }
+        $type = preg_replace('/[^a-z0-9_-]/i', '', $type);
 
         $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
         $allowedExts = ['jpg', 'jpeg', 'png', 'heic', 'mp4', 'mov'];
         if (!in_array($ext, $allowedExts)) {
             Response::error('File type not allowed', 422);
+        }
+
+        // Validate MIME type from file content, not just extension
+        $finfo = new \finfo(FILEINFO_MIME_TYPE);
+        $mime  = $finfo->file($file['tmp_name']);
+        $imageMimes = ['image/jpeg', 'image/png', 'image/heic'];
+        $videoMimes = ['video/mp4', 'video/quicktime'];
+        if (!in_array($mime, array_merge($imageMimes, $videoMimes), true)) {
+            Response::error('Invalid file content', 422);
         }
 
         // 50 MB limit for videos
@@ -92,7 +108,7 @@ class MediaController
 
         $type   = Request::get('type');
         $filter = ['client_id' => $clientId];
-        if ($type) $filter['type'] = $type;
+        if (is_string($type) && $type !== '') $filter['type'] = $type;
 
         $media = Database::collection('media_uploads')->find($filter, [
             'sort' => ['uploaded_at' => -1],

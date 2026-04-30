@@ -50,15 +50,24 @@ class CoachController {
                 fn($k) => in_array($k, $socialAllowed),
                 ARRAY_FILTER_USE_KEY
             );
-            // Sanitize URLs
+            // Sanitize URLs — reject invalid URLs instead of silently corrupting them
             foreach ($update['social_media'] as $key => $val) {
-                $update['social_media'][$key] = filter_var(trim((string)$val), FILTER_SANITIZE_URL);
+                $url = filter_var(trim((string)$val), FILTER_VALIDATE_URL);
+                if ($url === false) {
+                    Response::error("Invalid URL for social_media.{$key}", 422);
+                }
+                $parsed = parse_url($url);
+                if (!in_array($parsed['scheme'] ?? '', ['http', 'https'], true)) {
+                    Response::error("Invalid URL scheme for social_media.{$key}", 422);
+                }
+                $update['social_media'][$key] = $url;
             }
         }
 
+        // Password changes are NOT allowed through this endpoint.
+        // Use PUT /coach/profile/password (changePassword) instead.
         if (!empty($body['password'])) {
-            if (strlen($body['password']) < 8) Response::error('Password must be at least 8 characters', 422);
-            $update['password_hash'] = password_hash($body['password'], PASSWORD_BCRYPT, ['cost' => 12]);
+            Response::error('Password update is not allowed here. Use /coach/profile/password', 422);
         }
 
         $update['updated_at'] = new UTCDateTime();

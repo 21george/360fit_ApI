@@ -325,10 +325,16 @@ class LiveTrainingController
     public function clientShow(array $params): void
     {
         $clientId = new ObjectId($params['_auth']['sub']);
+        $client   = Database::collection('clients')->findOne(['_id' => $clientId]);
+        if (!$client || !isset($client['coach_id'])) Response::error('Client or coach not found', 404);
+
         if (!preg_match('/^[a-f0-9]{24}$/', $params['id'])) {
             Response::error('Invalid session ID', 400);
         }
-        $session = Database::collection('live_training_sessions')->findOne(['_id' => new ObjectId($params['id'])]);
+        $session = Database::collection('live_training_sessions')->findOne([
+            '_id'      => new ObjectId($params['id']),
+            'coach_id' => $client['coach_id'],
+        ]);
         if (!$session) Response::error('Session not found', 404);
 
         $f = $this->format($session);
@@ -348,10 +354,16 @@ class LiveTrainingController
     public function clientParticipants(array $params): void
     {
         $clientId = new ObjectId($params['_auth']['sub']);
+        $client   = Database::collection('clients')->findOne(['_id' => $clientId]);
+        if (!$client || !isset($client['coach_id'])) Response::error('Client or coach not found', 404);
+
         if (!preg_match('/^[a-f0-9]{24}$/', $params['id'])) {
             Response::error('Invalid session ID', 400);
         }
-        $session = Database::collection('live_training_sessions')->findOne(['_id' => new ObjectId($params['id'])]);
+        $session = Database::collection('live_training_sessions')->findOne([
+            '_id'      => new ObjectId($params['id']),
+            'coach_id' => $client['coach_id'],
+        ]);
         if (!$session) Response::error('Session not found', 404);
 
         $pids = (array) ($session['participant_ids'] ?? []);
@@ -413,13 +425,16 @@ class LiveTrainingController
     {
         $clientId = new ObjectId($params['_auth']['sub']);
         $client   = Database::collection('clients')->findOne(['_id' => $clientId]);
-        if (!$client) Response::error('Client not found', 404);
+        if (!$client || !isset($client['coach_id'])) Response::error('Client or coach not found', 404);
 
         if (!preg_match('/^[a-f0-9]{24}$/', $params['id'])) {
             Response::error('Invalid session ID', 400);
         }
         $sessionId = new ObjectId($params['id']);
-        $session   = Database::collection('live_training_sessions')->findOne(['_id' => $sessionId]);
+        $session   = Database::collection('live_training_sessions')->findOne([
+            '_id'      => $sessionId,
+            'coach_id' => $client['coach_id'],
+        ]);
         if (!$session) Response::error('Session not found', 404);
 
         // Check max participants
@@ -475,13 +490,16 @@ class LiveTrainingController
     {
         $clientId = new ObjectId($params['_auth']['sub']);
         $client   = Database::collection('clients')->findOne(['_id' => $clientId]);
-        if (!$client) Response::error('Client not found', 404);
+        if (!$client || !isset($client['coach_id'])) Response::error('Client or coach not found', 404);
 
         if (!preg_match('/^[a-f0-9]{24}$/', $params['id'])) {
             Response::error('Invalid session ID', 400);
         }
         $sessionId = new ObjectId($params['id']);
-        $session   = Database::collection('live_training_sessions')->findOne(['_id' => $sessionId]);
+        $session   = Database::collection('live_training_sessions')->findOne([
+            '_id'      => $sessionId,
+            'coach_id' => $client['coach_id'],
+        ]);
         if (!$session || ($session['status'] ?? '') !== 'live') {
             Response::error('Session not found or not live', 404);
         }
@@ -512,12 +530,24 @@ class LiveTrainingController
     public function clientGetChat(array $params): void
     {
         $clientId = new ObjectId($params['_auth']['sub']);
+        $client   = Database::collection('clients')->findOne(['_id' => $clientId]);
+        if (!$client || !isset($client['coach_id'])) Response::error('Client or coach not found', 404);
+
         if (!preg_match('/^[a-f0-9]{24}$/', $params['id'])) {
             Response::error('Invalid session ID', 400);
         }
         $sessionId = new ObjectId($params['id']);
-        $session   = Database::collection('live_training_sessions')->findOne(['_id' => $sessionId]);
+        $session   = Database::collection('live_training_sessions')->findOne([
+            '_id'      => $sessionId,
+            'coach_id' => $client['coach_id'],
+        ]);
         if (!$session) Response::error('Session not found', 404);
+
+        // Verify client is a participant
+        $pids = array_map('strval', (array) ($session['participant_ids'] ?? []));
+        if (!in_array((string) $clientId, $pids, true)) {
+            Response::error('Not a participant', 403);
+        }
 
         $messages = (array) Database::collection('live_training_chat')
             ->find(['session_id' => $sessionId], ['sort' => ['sent_at' => 1]])

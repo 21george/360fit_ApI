@@ -43,7 +43,15 @@ class MessageController
             if (!in_array($body['media_type'], $allowedTypes)) {
                 Response::error('Invalid media type. Allowed: image, file', 422);
             }
-            $body['media_url'] = filter_var(trim($body['media_url']), FILTER_SANITIZE_URL);
+            $url = filter_var(trim($body['media_url']), FILTER_VALIDATE_URL);
+            if ($url === false) {
+                Response::error('Invalid media_url', 422);
+            }
+            $parsed = parse_url($url);
+            if (!in_array($parsed['scheme'] ?? '', ['http', 'https'], true)) {
+                Response::error('media_url must use http:// or https://', 422);
+            }
+            $body['media_url'] = $url;
         }
 
         if ($auth['role'] === 'coach') {
@@ -53,11 +61,8 @@ class MessageController
             $senderId   = $coachId;
             $senderRole = 'coach';
 
-            // Notify client
+            // Fetch client now; notification will be sent after insert so we have the messageId
             $client = Database::collection('clients')->findOne(['_id' => $clientId]);
-            if ($client && !empty($client['fcm_token'])) {
-                FcmService::notifyNewMessage($client['fcm_token'], $auth['name']);
-            }
         } else {
             $clientId = new ObjectId($auth['sub']);
             $client   = Database::collection('clients')->findOne(['_id' => $clientId]);
@@ -106,6 +111,24 @@ class MessageController
             } catch (\Throwable $e) {
                 // Log error but don't fail the message send
                 error_log('Failed to send notification for client message: ' . $e->getMessage());
+            }
+        }
+
+        // Notify client when coach sends a message
+        if ($senderRole === 'coach') {
+            try {
+                if ($client) {
+                    $triggerService = new NotificationTriggerService();
+                    $coachName = trim(($auth['name'] ?? '') ?: 'Your coach');
+                    $triggerService->notifyClientNewMessage(
+                        $coachName,
+                        (string) $coachId,
+                        (string) $clientId,
+                        $messageId
+                    );
+                }
+            } catch (\Throwable $e) {
+                error_log('Failed to send notification for coach message: ' . $e->getMessage());
             }
         }
 
@@ -236,7 +259,7 @@ class MessageController
             $variants[] = (string) $coachId;
         } elseif (is_string($coachId) && $coachId !== '') {
             $variants[] = $coachId;
-            if (ObjectId::isValid($coachId)) {
+            if (preg_match('/^[a-f0-9]{24}$/', $coachId)) {
                 $variants[] = new ObjectId($coachId);
             }
         }

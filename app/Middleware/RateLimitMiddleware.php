@@ -62,9 +62,21 @@ class RateLimitMiddleware
 
     private function getClientIp(): string
     {
-        foreach (['HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'REMOTE_ADDR'] as $key) {
-            if (!empty($_SERVER[$key])) {
-                return explode(',', $_SERVER[$key])[0];
+        // Trust only REMOTE_ADDR directly to prevent X-Forwarded-For spoofing.
+        // If behind a trusted reverse proxy, use the last IP in X-Forwarded-For
+        // (the one closest to the server), not the first (which can be forged).
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $ips = array_map('trim', explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']));
+            // Use the last IP added by the closest proxy
+            $ip = filter_var(end($ips), FILTER_VALIDATE_IP);
+            if ($ip !== false) {
+                return $ip;
+            }
+        }
+        if (!empty($_SERVER['REMOTE_ADDR'])) {
+            $ip = filter_var($_SERVER['REMOTE_ADDR'], FILTER_VALIDATE_IP);
+            if ($ip !== false) {
+                return $ip;
             }
         }
         return '0.0.0.0';

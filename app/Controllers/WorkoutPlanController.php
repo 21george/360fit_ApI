@@ -6,7 +6,7 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Helpers\{Request, Response};
-use App\Services\{ExcelImportService, FcmService};
+use App\Services\{ExcelImportService, FcmService, NotificationTriggerService};
 use MongoDB\BSON\ObjectId;
 
 class WorkoutPlanController
@@ -17,20 +17,33 @@ class WorkoutPlanController
         $coachId  = new ObjectId($params['_auth']['sub']);
         $filter   = ['coach_id' => $coachId];
         $clientId = Request::get('client_id');
-        $status   = Request::get('status');
-        $week     = Request::get('week_start');
 
-        $isClient = false;
-        if ($clientId) {
-            $isClient = true;
-            // Remove coach_id filter for client view
-            unset($filter['coach_id']);
+        // NoSQL injection fix: validate GET params are scalar strings
+        $status   = Request::get('status');
+        if (is_string($status) && $status !== '') {
+            $filter['status'] = $status;
         }
-        if ($status)    $filter['status']      = $status;
-        if ($week)      $filter['week_start']  = new \MongoDB\BSON\UTCDateTime(strtotime($week) * 1000);
+        $week = Request::get('week_start');
+        if (is_string($week) && $week !== '') {
+            $filter['week_start'] = new \MongoDB\BSON\UTCDateTime(strtotime($week) * 1000);
+        }
 
         $planType = Request::get('plan_type');
-        if ($planType) $filter['plan_type'] = $planType;
+        if (is_string($planType) && $planType !== '') {
+            $filter['plan_type'] = $planType;
+        }
+
+        $isClient = false;
+        if (is_string($clientId) && $clientId !== '' && preg_match('/^[a-f0-9]{24}$/', $clientId)) {
+            $isClient = true;
+            // Verify the client belongs to this coach before showing their plans
+            $clientObjId = new ObjectId($clientId);
+            $client = Database::collection('clients')->findOne([
+                '_id'      => $clientObjId,
+                'coach_id' => $coachId,
+            ]);
+            if (!$client) Response::error('Client not found', 404);
+        }
 
         $page    = max(1, (int) Request::get('page', 1));
         $perPage = 20;
@@ -39,17 +52,20 @@ class WorkoutPlanController
         if ($isClient) {
             // Show plans where client is assigned (individual or group)
             $clientObjId = new ObjectId($clientId);
-            $clientMatch = [
-                '$or' => [
-                    ['client_id' => $clientObjId],
-                    ['client_ids' => ['$in' => [$clientObjId]]]
-                ]
+            $filter = ['coach_id' => $coachId];
+            $filter['$or'] = [
+                ['client_id' => $clientObjId],
+                ['client_ids' => ['$in' => [$clientObjId]]]
             ];
-            $extraFilters = [];
-            if ($status)    $extraFilters['status'] = $status;
-            if ($week)      $extraFilters['week_start'] = new \MongoDB\BSON\UTCDateTime(strtotime($week) * 1000);
-            if ($planType)  $extraFilters['plan_type'] = $planType;
-            $filter = array_merge($extraFilters, $clientMatch);
+            if (is_string($status) && $status !== '') {
+                $filter['status'] = $status;
+            }
+            if (is_string($week) && $week !== '') {
+                $filter['week_start'] = new \MongoDB\BSON\UTCDateTime(strtotime($week) * 1000);
+            }
+            if (is_string($planType) && $planType !== '') {
+                $filter['plan_type'] = $planType;
+            }
         }
 
         $total   = $col->countDocuments($filter);
@@ -97,6 +113,7 @@ class WorkoutPlanController
             'created_at'          => new \MongoDB\BSON\UTCDateTime(),
             'updated_at'          => new \MongoDB\BSON\UTCDateTime(),
         ];
+        $clientIds = is_array($body['client_ids'] ?? null) ? array_values($body['client_ids']) : [];
 
         // Client assignment is optional — plan can be saved without assignment
         if ($planType === 'individual' && !empty($body['client_id'])) {
@@ -104,26 +121,44 @@ class WorkoutPlanController
             $client   = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
             if (!$client) Response::error('Client not found', 404);
             $doc['client_id'] = $clientId;
-            if (!empty($client['fcm_token'])) FcmService::notifyNewPlan($client['fcm_token']);
         } elseif (in_array($planType, ['group', 'team'])) {
             if (!empty($body['group_name'])) {
                 $doc['group_name'] = $body['group_name'];
             }
-            if (!empty($body['client_ids']) && is_array($body['client_ids'])) {
-                $clientIds = array_map(fn($id) => new ObjectId($id), $body['client_ids']);
+            if (!empty($clientIds)) {
+                $clientIds = array_map(fn($id) => new ObjectId($id), $clientIds);
                 $doc['client_ids'] = $clientIds;
-                $assignedClients = Database::collection('clients')->find([
-                    '_id'      => ['\$in' => $clientIds],
-                    'coach_id' => $coachId,
-                ]);
-                foreach ($assignedClients as $c) {
-                    if (!empty($c['fcm_token'])) FcmService::notifyNewPlan($c['fcm_token']);
+            }
+        }
+
+        $result    = Database::collection('workout_plans')->insertOne($doc);
+        $planId    = (string) $result->getInsertedId();
+        $planTitle = $doc['title'];
+
+        // Notify assigned clients (in-app + push)
+        $triggerService = new NotificationTriggerService();
+        
+        if ($planType === 'individual' && isset($client)) {
+            try {
+                $triggerService->notifyClientNewPlan($planTitle, $planId, (string) $doc['client_id']);
+            } catch (\Throwable $e) {
+                error_log('Failed to send new plan notification to individual client: ' . $e->getMessage());
+            }
+        } elseif (in_array($planType, ['group', 'team']) && !empty($clientIds)) {
+            $assignedClients = Database::collection('clients')->find([
+                '_id'      => ['$in' => $clientIds],
+                'coach_id' => $coachId,
+            ]);
+            foreach ($assignedClients as $c) {
+                try {
+                    $triggerService->notifyClientNewPlan($planTitle, $planId, (string) $c['_id']);
+                } catch (\Throwable $e) {
+                    error_log('Failed to send new plan notification to client ' . (string) $c['_id'] . ': ' . $e->getMessage());
                 }
             }
         }
 
-        $result = Database::collection('workout_plans')->insertOne($doc);
-        Response::success(['id' => (string) $result->getInsertedId()], 'Workout plan created', 201);
+        Response::success(['id' => $planId], 'Workout plan created', 201);
     }
 
     // GET /workout-plans/:id
@@ -154,6 +189,28 @@ class WorkoutPlanController
         }
 
         Database::collection('workout_plans')->updateOne(['_id' => $plan['_id']], ['$set' => $set]);
+
+        // Fetch the updated plan to ensure notifications use the latest data
+        $updatedPlan = Database::collection('workout_plans')->findOne(['_id' => $plan['_id']]);
+
+        // Notify assigned client(s) that the plan was updated
+        try {
+            $triggerService = new NotificationTriggerService();
+            $planTitle      = $updatedPlan['title'] ?? 'Your plan';
+            $planIdStr      = (string) $plan['_id'];
+
+            if (!empty($updatedPlan['client_id'])) {
+                $triggerService->notifyClientPlanUpdated($planTitle, $planIdStr, (string) $updatedPlan['client_id']);
+            }
+            if (!empty($updatedPlan['client_ids'])) {
+                foreach ($updatedPlan['client_ids'] as $cid) {
+                    $triggerService->notifyClientPlanUpdated($planTitle, $planIdStr, (string) $cid);
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log('Failed to send plan-updated notification: ' . $e->getMessage());
+        }
+
         Response::success(null, 'Plan updated');
     }
 
@@ -252,11 +309,15 @@ class WorkoutPlanController
             ['$set' => $update]
         );
 
-        // Notify all assigned clients
-        foreach ($clientObjects as $client) {
-            if (!empty($client['fcm_token'])) {
-                FcmService::notifyNewPlan($client['fcm_token']);
+        // Notify all assigned clients (in-app + push)
+        try {
+            $triggerService = new NotificationTriggerService();
+            $planTitle = $plan['title'] ?? 'Your plan';
+            foreach ($clientObjects as $client) {
+                $triggerService->notifyClientNewPlan($planTitle, (string) $planId, (string) $client['_id']);
             }
+        } catch (\Throwable $e) {
+            error_log('Failed to send assignment notification: ' . $e->getMessage());
         }
 
         Response::success([

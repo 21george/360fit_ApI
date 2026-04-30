@@ -200,7 +200,13 @@ class WorkoutLogController
     // GET /coach/clients/:id/logs (coach view)
     public function clientLogs(array $params): void
     {
+        $coachId  = new ObjectId($params['_auth']['sub']);
         $clientId = new ObjectId($params['id']);
+
+        // Verify the client belongs to this coach (IDOR fix)
+        $client = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
+        if (!$client) Response::error('Client not found', 404);
+
         $page     = max(1, (int) Request::get('page', 1));
         $perPage  = 20;
 
@@ -375,7 +381,12 @@ class WorkoutLogController
     // GET /coach/clients/:id/workout-progress (coach view — grouped completed vs in-progress)
     public function clientWorkoutProgress(array $params): void
     {
+        $coachId  = new ObjectId($params['_auth']['sub']);
         $clientId = new ObjectId($params['id']);
+
+        // Verify the client belongs to this coach (IDOR fix)
+        $client = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
+        if (!$client) Response::error('Client not found', 404);
 
         // Get all plans assigned to this client
         $clientFilter = $this->clientPlanFilter($clientId);

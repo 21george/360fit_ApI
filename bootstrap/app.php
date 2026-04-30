@@ -23,12 +23,14 @@ $allowedOrigins = array_map(fn(string $o) => rtrim($o, '/'), $allowedOrigins);
 
 $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
 
-if (in_array($origin, $allowedOrigins, true)) {
+$originAllowed = in_array($origin, $allowedOrigins, true);
+if ($originAllowed) {
     header("Access-Control-Allow-Origin: $origin");
+    header('Access-Control-Allow-Credentials: true');
 }
+header('Vary: Origin');
 header('Access-Control-Allow-Methods: ' . implode(', ', $corsConfig['allowed_methods']));
 header('Access-Control-Allow-Headers: ' . implode(', ', $corsConfig['allowed_headers']));
-header('Access-Control-Allow-Credentials: true');
 header('Access-Control-Max-Age: ' . ($corsConfig['max_age'] ?? 86400));
 header('Content-Type: application/json; charset=utf-8');
 

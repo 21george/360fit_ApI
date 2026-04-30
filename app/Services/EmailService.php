@@ -10,13 +10,18 @@ class EmailService
         $appName = $_ENV['APP_NAME'] ?? 'CoachPro';
         $subject = "{$appName} — Your Login Code";
 
+        $escAppName   = htmlspecialchars($appName, ENT_QUOTES, 'UTF-8');
+        $escClientName = htmlspecialchars($clientName, ENT_QUOTES, 'UTF-8');
+        $escCoachName  = htmlspecialchars($coachName, ENT_QUOTES, 'UTF-8');
+        $escLoginCode  = htmlspecialchars($loginCode, ENT_QUOTES, 'UTF-8');
+
         $html = <<<HTML
         <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:480px;margin:0 auto;padding:32px 24px;background:#f8f9fa;border-radius:12px">
-          <h2 style="margin:0 0 8px;color:#0a2f60">{$appName}</h2>
-          <p style="color:#4b5563;font-size:14px;margin:0 0 24px">Hi <strong>{$clientName}</strong>,</p>
-          <p style="color:#4b5563;font-size:14px;margin:0 0 16px">Your coach <strong>{$coachName}</strong> has created an account for you. Use the code below to log in to the app:</p>
+          <h2 style="margin:0 0 8px;color:#0a2f60">{$escAppName}</h2>
+          <p style="color:#4b5563;font-size:14px;margin:0 0 24px">Hi <strong>{$escClientName}</strong>,</p>
+          <p style="color:#4b5563;font-size:14px;margin:0 0 16px">Your coach <strong>{$escCoachName}</strong> has created an account for you. Use the code below to log in to the app:</p>
           <div style="background:#0a2f60;color:#fff;text-align:center;padding:20px;border-radius:10px;margin:0 0 24px">
-            <span style="font-size:28px;font-weight:700;letter-spacing:4px;font-family:monospace">{$loginCode}</span>
+            <span style="font-size:28px;font-weight:700;letter-spacing:4px;font-family:monospace">{$escLoginCode}</span>
           </div>
           <p style="color:#6b7280;font-size:12px;margin:0">This code is personal — do not share it. If you have questions, contact your coach directly.</p>
         </div>
