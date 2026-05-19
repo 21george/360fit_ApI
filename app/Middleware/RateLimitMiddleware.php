@@ -62,23 +62,28 @@ class RateLimitMiddleware
 
     private function getClientIp(): string
     {
-        // Trust only REMOTE_ADDR directly to prevent X-Forwarded-For spoofing.
-        // If behind a trusted reverse proxy, use the last IP in X-Forwarded-For
-        // (the one closest to the server), not the first (which can be forged).
-        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-            $ips = array_map('trim', explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']));
-            // Use the last IP added by the closest proxy
-            $ip = filter_var(end($ips), FILTER_VALIDATE_IP);
-            if ($ip !== false) {
-                return $ip;
+        $remoteAddr = filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP);
+        $trustedProxies = array_values(array_filter(
+            array_map('trim', explode(',', (string) ($_ENV['TRUSTED_PROXIES'] ?? ''))),
+            fn(string $ip): bool => filter_var($ip, FILTER_VALIDATE_IP) !== false
+        ));
+
+        if (
+            $remoteAddr !== false
+            && in_array($remoteAddr, $trustedProxies, true)
+            && !empty($_SERVER['HTTP_X_FORWARDED_FOR'])
+        ) {
+            $ips = array_map('trim', explode(',', (string) $_SERVER['HTTP_X_FORWARDED_FOR']));
+            $forwardedIp = filter_var(end($ips), FILTER_VALIDATE_IP);
+            if ($forwardedIp !== false) {
+                return $forwardedIp;
             }
         }
-        if (!empty($_SERVER['REMOTE_ADDR'])) {
-            $ip = filter_var($_SERVER['REMOTE_ADDR'], FILTER_VALIDATE_IP);
-            if ($ip !== false) {
-                return $ip;
-            }
+
+        if ($remoteAddr !== false) {
+            return $remoteAddr;
         }
+
         return '0.0.0.0';
     }
 }

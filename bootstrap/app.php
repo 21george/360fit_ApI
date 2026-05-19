@@ -67,6 +67,13 @@ set_exception_handler(function (Throwable $e) {
     if (php_sapi_name() !== 'cli-server') {
         error_log('Stack trace: ' . $e->getTraceAsString());
     }
+    
+    // Log to file for debugging
+    $logFile = BASE_PATH . '/storage/logs/error.log';
+    if (is_writable(dirname($logFile))) {
+        file_put_contents($logFile, date('Y-m-d H:i:s') . ' - ' . $errorMsg . PHP_EOL, FILE_APPEND);
+    }
+    
     Response::json(['error' => 'Internal server error'], 500);
 });
 

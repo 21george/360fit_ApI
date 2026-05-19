@@ -24,8 +24,14 @@ class WorkoutPlanController
             $filter['status'] = $status;
         }
         $week = Request::get('week_start');
+        $weekTs = null;
         if (is_string($week) && $week !== '') {
-            $filter['week_start'] = new \MongoDB\BSON\UTCDateTime(strtotime($week) * 1000);
+            $weekTs = strtotime($week);
+            if ($weekTs === false) {
+                Response::error('Invalid week_start', 422);
+                return;
+            }
+            $filter['week_start'] = new \MongoDB\BSON\UTCDateTime($weekTs * 1000);
         }
 
         $planType = Request::get('plan_type');
@@ -60,8 +66,8 @@ class WorkoutPlanController
             if (is_string($status) && $status !== '') {
                 $filter['status'] = $status;
             }
-            if (is_string($week) && $week !== '') {
-                $filter['week_start'] = new \MongoDB\BSON\UTCDateTime(strtotime($week) * 1000);
+            if ($weekTs !== null) {
+                $filter['week_start'] = new \MongoDB\BSON\UTCDateTime($weekTs * 1000);
             }
             if (is_string($planType) && $planType !== '') {
                 $filter['plan_type'] = $planType;
@@ -100,12 +106,17 @@ class WorkoutPlanController
         if (!$weekStart) {
             $weekStart = date('Y-m-d', strtotime('next monday'));
         }
+        $weekTs = strtotime($weekStart);
+        if ($weekTs === false) {
+            Response::error('Invalid week_start', 422);
+            return;
+        }
 
         $doc = [
             'coach_id'            => $coachId,
             'plan_type'           => $planType,
             'title'               => $body['title'],
-            'week_start'          => new \MongoDB\BSON\UTCDateTime(strtotime($weekStart) * 1000),
+            'week_start'          => new \MongoDB\BSON\UTCDateTime($weekTs * 1000),
             'status'              => $body['status'] ?? 'draft',
             'days'                => $body['days'] ?? [],
             'notes'               => $body['notes'] ?? null,
@@ -117,7 +128,12 @@ class WorkoutPlanController
 
         // Client assignment is optional — plan can be saved without assignment
         if ($planType === 'individual' && !empty($body['client_id'])) {
-            $clientId = new ObjectId($body['client_id']);
+            try {
+                $clientId = new ObjectId($body['client_id']);
+            } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+                Response::error('Invalid client ID', 400);
+                return;
+            }
             $client   = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
             if (!$client) Response::error('Client not found', 404);
             $doc['client_id'] = $clientId;
@@ -126,6 +142,12 @@ class WorkoutPlanController
                 $doc['group_name'] = $body['group_name'];
             }
             if (!empty($clientIds)) {
+                foreach ($clientIds as $id) {
+                    if (!is_string($id) || !preg_match('/^[a-f0-9]{24}$/i', $id)) {
+                        Response::error('Invalid client ID', 400);
+                        return;
+                    }
+                }
                 $clientIds = array_map(fn($id) => new ObjectId($id), $clientIds);
                 $doc['client_ids'] = $clientIds;
             }
@@ -179,8 +201,19 @@ class WorkoutPlanController
         foreach ($allowed as $field) {
             if (isset($body[$field])) {
                 if ($field === 'week_start') {
-                    $set[$field] = new \MongoDB\BSON\UTCDateTime(strtotime($body[$field]) * 1000);
+                    $ts = strtotime($body[$field]);
+                    if ($ts === false) {
+                        Response::error('Invalid week_start', 422);
+                        return;
+                    }
+                    $set[$field] = new \MongoDB\BSON\UTCDateTime($ts * 1000);
                 } elseif ($field === 'client_ids' && is_array($body[$field])) {
+                    foreach ($body[$field] as $id) {
+                        if (!is_string($id) || !preg_match('/^[a-f0-9]{24}$/i', $id)) {
+                            Response::error('Invalid client ID', 400);
+                            return;
+                        }
+                    }
                     $set[$field] = array_map(fn($id) => new ObjectId($id), $body[$field]);
                 } else {
                     $set[$field] = $body[$field];
@@ -194,21 +227,26 @@ class WorkoutPlanController
         $updatedPlan = Database::collection('workout_plans')->findOne(['_id' => $plan['_id']]);
 
         // Notify assigned client(s) that the plan was updated
-        try {
-            $triggerService = new NotificationTriggerService();
-            $planTitle      = $updatedPlan['title'] ?? 'Your plan';
-            $planIdStr      = (string) $plan['_id'];
+        $triggerService = new NotificationTriggerService();
+        $planTitle      = $updatedPlan['title'] ?? 'Your plan';
+        $planIdStr      = (string) $plan['_id'];
 
+        try {
             if (!empty($updatedPlan['client_id'])) {
                 $triggerService->notifyClientPlanUpdated($planTitle, $planIdStr, (string) $updatedPlan['client_id']);
             }
-            if (!empty($updatedPlan['client_ids'])) {
-                foreach ($updatedPlan['client_ids'] as $cid) {
-                    $triggerService->notifyClientPlanUpdated($planTitle, $planIdStr, (string) $cid);
-                }
-            }
         } catch (\Throwable $e) {
             error_log('Failed to send plan-updated notification: ' . $e->getMessage());
+        }
+
+        if (!empty($updatedPlan['client_ids'])) {
+            foreach ($updatedPlan['client_ids'] as $cid) {
+                try {
+                    $triggerService->notifyClientPlanUpdated($planTitle, $planIdStr, (string) $cid);
+                } catch (\Throwable $e) {
+                    error_log('Failed to send plan-updated notification to client ' . (string) $cid . ': ' . $e->getMessage());
+                }
+            }
         }
 
         Response::success(null, 'Plan updated');
@@ -310,14 +348,14 @@ class WorkoutPlanController
         );
 
         // Notify all assigned clients (in-app + push)
-        try {
-            $triggerService = new NotificationTriggerService();
-            $planTitle = $plan['title'] ?? 'Your plan';
-            foreach ($clientObjects as $client) {
+        $triggerService = new NotificationTriggerService();
+        $planTitle = $plan['title'] ?? 'Your plan';
+        foreach ($clientObjects as $client) {
+            try {
                 $triggerService->notifyClientNewPlan($planTitle, (string) $planId, (string) $client['_id']);
+            } catch (\Throwable $e) {
+                error_log('Failed to send assignment notification to client ' . (string) $client['_id'] . ': ' . $e->getMessage());
             }
-        } catch (\Throwable $e) {
-            error_log('Failed to send assignment notification: ' . $e->getMessage());
         }
 
         Response::success([
@@ -536,7 +574,11 @@ class WorkoutPlanController
     private function findPlan(array $params): object
     {
         $coachId = new ObjectId($params['_auth']['sub']);
-        $planId  = new ObjectId($params['id']);
+        try {
+            $planId = new ObjectId($params['id']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid plan ID', 400);
+        }
         $plan    = Database::collection('workout_plans')->findOne([
             '_id'      => $planId,
             'coach_id' => $coachId,

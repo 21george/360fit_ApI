@@ -18,7 +18,16 @@ class MediaController
         $errors   = Request::validate($body, ['filename' => 'required', 'content_type' => 'required', 'type' => 'required']);
         if ($errors) Response::error('Validation failed', 422, $errors);
 
-        $allowed = ['video/mp4', 'video/quicktime', 'image/jpeg', 'image/png', 'image/heic'];
+        $allowed = [
+            'video/mp4',
+            'video/quicktime',
+            'image/jpeg',
+            'image/png',
+            'image/heic',
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ];
         if (!in_array($body['content_type'], $allowed)) {
             Response::error('Unsupported media type', 422);
         }
@@ -53,7 +62,7 @@ class MediaController
         $type = preg_replace('/[^a-z0-9_-]/i', '', $type);
 
         $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-        $allowedExts = ['jpg', 'jpeg', 'png', 'heic', 'mp4', 'mov'];
+        $allowedExts = ['jpg', 'jpeg', 'png', 'heic', 'mp4', 'mov', 'pdf', 'doc', 'docx'];
         if (!in_array($ext, $allowedExts)) {
             Response::error('File type not allowed', 422);
         }
@@ -63,7 +72,12 @@ class MediaController
         $mime  = $finfo->file($file['tmp_name']);
         $imageMimes = ['image/jpeg', 'image/png', 'image/heic'];
         $videoMimes = ['video/mp4', 'video/quicktime'];
-        if (!in_array($mime, array_merge($imageMimes, $videoMimes), true)) {
+        $documentMimes = [
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        ];
+        if (!in_array($mime, array_merge($imageMimes, $videoMimes, $documentMimes), true)) {
             Response::error('Invalid file content', 422);
         }
 

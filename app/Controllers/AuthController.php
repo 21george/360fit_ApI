@@ -75,14 +75,40 @@ class AuthController
         $refreshToken = JwtService::generateRefreshToken($payload);
         $this->setTokenCookies($accessToken, $refreshToken);
 
+        $subscriptionStatus = $coach['subscription_status'] ?? 'none';
+        $subscriptionAlert = null;
+        if (in_array($subscriptionStatus, ['pending', 'none'], true)) {
+            $subscriptionAlert = 'select_plan';
+        } elseif ($subscriptionStatus === 'past_due') {
+            $subscriptionAlert = 'update_payment';
+        } elseif ($subscriptionStatus === 'cancelled') {
+            $subscriptionAlert = 'resubscribe';
+        } elseif (($coach['cancel_at_period_end'] ?? false) === true) {
+            $subscriptionAlert = 'renew_subscription';
+        }
+
+        $setupToken = null;
+        if ($subscriptionStatus === 'pending') {
+            $setupPayload = [
+                'sub'  => (string) $coach['_id'],
+                'role' => 'coach',
+                'type' => 'setup',
+            ];
+            $setupToken = JwtService::generateAccessToken($setupPayload, 3600);
+        }
+
         Response::success([
             'access_token'  => $accessToken,
             'refresh_token' => $refreshToken,
+            'setup_token'   => $setupToken,
             'coach'         => [
-                'id'       => (string) $coach['_id'],
-                'name'     => $coach['name'],
-                'email'    => $coach['email'],
-                'language' => $coach['language'] ?? 'en',
+                'id'                  => (string) $coach['_id'],
+                'name'                => $coach['name'],
+                'email'               => $coach['email'],
+                'language'            => $coach['language'] ?? 'en',
+                'subscription_status' => $subscriptionStatus,
+                'subscription_alert'  => $subscriptionAlert,
+                'cancel_at_period_end'=> $coach['cancel_at_period_end'] ?? false,
             ]
         ], 'Login successful');
     }

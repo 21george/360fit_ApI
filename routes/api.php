@@ -91,6 +91,9 @@ $router->delete('/checkins/:id',[CheckinController::class, 'destroy'],[CoachMidd
 // ─── Coach: Messages ──────────────────────────────────────────────────────────
 $router->get('/messages/:clientId/typing', [MessageController::class, 'coachTypingStatus'], [CoachMiddleware::class]);
 $router->post('/messages/:clientId/typing', [MessageController::class, 'updateCoachTyping'], [CoachMiddleware::class]);
+$router->get('/messages/unread',           [MessageController::class, 'unreadMessages'],   [CoachMiddleware::class]);
+$router->get('/messages/unread-count',     [MessageController::class, 'unreadCount'],      [CoachMiddleware::class]);
+$router->post('/messages/read-all',         [MessageController::class, 'markAllRead'],      [CoachMiddleware::class]);
 $router->get('/messages/:clientId', [MessageController::class, 'coachThread'], [CoachMiddleware::class]);
 $router->post('/messages',          [MessageController::class, 'send'],        [CoachMiddleware::class]);
 $router->post('/messages/upload-media', [MessageController::class, 'uploadMedia'], [CoachMiddleware::class]);

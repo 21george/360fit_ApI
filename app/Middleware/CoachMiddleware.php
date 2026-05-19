@@ -15,11 +15,18 @@ class CoachMiddleware extends AuthMiddleware
         }
 
         // Verify coach still exists and is active (token invalidation fix)
-        $coach = \App\Config\Database::collection('coaches')->findOne([
-            '_id' => new \MongoDB\BSON\ObjectId((string) $params['_auth']['sub']),
-        ]);
+        try {
+            $coach = \App\Config\Database::collection('coaches')->findOne([
+                '_id' => new \MongoDB\BSON\ObjectId((string) $params['_auth']['sub']),
+            ]);
+        } catch (\InvalidArgumentException | \MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            $coach = null;
+        }
         if (!$coach) {
             Response::error('Coach not found', 403);
+        }
+        if (($coach['active'] ?? true) !== true) {
+            Response::error('Coach access blocked', 403);
         }
 
         $params['_coach'] = $coach;

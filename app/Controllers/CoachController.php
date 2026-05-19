@@ -52,7 +52,13 @@ class CoachController {
             );
             // Sanitize URLs — reject invalid URLs instead of silently corrupting them
             foreach ($update['social_media'] as $key => $val) {
-                $url = filter_var(trim((string)$val), FILTER_VALIDATE_URL);
+                $trimmed = trim((string) $val);
+                if ($trimmed === '') {
+                    $update['social_media'][$key] = '';
+                    continue;
+                }
+
+                $url = filter_var($trimmed, FILTER_VALIDATE_URL);
                 if ($url === false) {
                     Response::error("Invalid URL for social_media.{$key}", 422);
                 }
@@ -232,6 +238,17 @@ class CoachController {
         );
 
         Response::success(null, 'Password changed successfully');
+    }
+
+    public function index(array $params): void
+    {
+        $coaches = Database::collection('coaches')->find(
+            [],
+            ['projection' => ['password_hash' => 0], 'sort' => ['created_at' => -1], 'limit' => 200]
+        )->toArray();
+
+        $data = array_map(fn($c) => $this->format($c), $coaches);
+        Response::success($data);
     }
 
     private function format($coach): array {

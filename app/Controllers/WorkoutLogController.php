@@ -442,7 +442,7 @@ class WorkoutLogController
                         'is_completed' => $isCompleted,
                         'completed_at'  => $isCompleted ? (string) ($planLogs[$dayKey]['completed_at'] ?? '') : null,
                     ];
-                }, $plan['days'] ?? []),
+                }, (array) ($plan['days'] ?? [])),
             ];
 
             if ($completedDays === $totalDays && $totalDays > 0) {

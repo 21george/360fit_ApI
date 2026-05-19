@@ -288,6 +288,18 @@ class NotificationsController
      */
     private function format(object $doc): array
     {
+        $sentAt = null;
+        if (isset($doc['sent_at'])) {
+            $ts = $doc['sent_at'];
+            if ($ts instanceof \MongoDB\BSON\UTCDateTime) {
+                $sentAt = $ts->toDateTime()->format('Y-m-d H:i:s');
+            } elseif (is_numeric($ts)) {
+                $sentAt = date('Y-m-d H:i:s', (int) ($ts / 1000));
+            } elseif (is_string($ts)) {
+                $sentAt = $ts;
+            }
+        }
+
         return [
             'id' => (string) $doc['_id'],
             'type' => $doc['type'],
@@ -295,7 +307,7 @@ class NotificationsController
             'body' => $doc['body'],
             'data' => $doc['data'] ?? [],
             'read' => $doc['read'] ?? false,
-            'sent_at' => $doc['sent_at'] ? date('Y-m-d H:i:s', (int) ((string) $doc['sent_at']) / 1000) : null,
+            'sent_at' => $sentAt,
         ];
     }
 }

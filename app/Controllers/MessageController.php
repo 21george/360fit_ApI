@@ -259,7 +259,7 @@ class MessageController
             $variants[] = (string) $coachId;
         } elseif (is_string($coachId) && $coachId !== '') {
             $variants[] = $coachId;
-            if (preg_match('/^[a-f0-9]{24}$/', $coachId)) {
+            if (ObjectId::isValid($coachId)) {
                 $variants[] = new ObjectId($coachId);
             }
         }
@@ -335,6 +335,88 @@ class MessageController
     {
         $client = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
         if (!$client) Response::error('Client not found', 404);
+    }
+
+    // GET /messages/unread
+    public function unreadMessages(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+
+        $messages = Database::collection('messages')->find(
+            [
+                'coach_id'    => $coachId,
+                'sender_role' => 'client',
+                'read'        => false,
+            ],
+            ['sort' => ['sent_at' => -1], 'limit' => 100]
+        )->toArray();
+
+        $clients = [];
+        foreach ($messages as $msg) {
+            $clientId = (string) $msg['client_id'];
+            if (!isset($clients[$clientId])) {
+                $client = Database::collection('clients')->findOne(
+                    ['_id' => $msg['client_id']],
+                    ['projection' => ['name' => 1, 'profile_photo' => 1]]
+                );
+                $clients[$clientId] = [
+                    'client_id'   => $clientId,
+                    'client_name' => $client['name'] ?? 'Unknown',
+                    'profile_photo' => $client['profile_photo'] ?? null,
+                    'messages'    => [],
+                ];
+            }
+            $clients[$clientId]['messages'][] = [
+                'id'       => (string) $msg['_id'],
+                'content'  => $msg['content'] ?? '',
+                'sent_at'  => $this->formatDateValue($msg['sent_at'] ?? null),
+            ];
+        }
+
+        Response::success([
+            'messages' => array_values($clients),
+            'count'    => count($messages),
+        ]);
+    }
+
+    // GET /messages/unread-count
+    public function unreadCount(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+
+        $count = Database::collection('messages')->countDocuments([
+            'coach_id'    => $coachId,
+            'sender_role' => 'client',
+            'read'        => false,
+        ]);
+
+        $clients = Database::collection('messages')->aggregate([
+            ['$match' => ['coach_id' => $coachId, 'sender_role' => 'client', 'read' => false]],
+            ['$group' => ['_id' => '$client_id', 'count' => ['$sum' => 1], 'last_message' => ['$last' => '$content']]],
+            ['$sort' => ['count' => -1]],
+        ])->toArray();
+
+        $result = array_map(fn($c) => [
+            'client_id'    => (string) $c['_id'],
+            'client_name'  => (Database::collection('clients')->findOne(['_id' => $c['_id']])['name'] ?? 'Unknown'),
+            'count'        => $c['count'],
+            'last_message' => $c['last_message'] ?? '',
+        ], $clients);
+
+        Response::success(['count' => $count, 'clients' => $result]);
+    }
+
+    // POST /messages/read-all
+    public function markAllRead(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+
+        $result = Database::collection('messages')->updateMany(
+            ['coach_id' => $coachId, 'sender_role' => 'client', 'read' => false],
+            ['$set' => ['read' => true]]
+        );
+
+        Response::success(['marked' => $result->getModifiedCount()], 'All messages marked as read');
     }
 
     // POST /messages/upload-media or /client/messages/upload-media
