@@ -17,7 +17,7 @@ use App\Controllers\{
     SubscriptionController,
     NotificationsController
 };
-use App\Middleware\{AuthMiddleware, CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SubscriptionMiddleware, SetupAuthMiddleware};
+use App\Middleware\{AuthMiddleware, CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SetupAuthMiddleware};
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 $router->get('/health', function () {
@@ -51,7 +51,7 @@ $router->get('/coaches/registered', [CoachController::class, 'index'], [CoachMid
 
 // ─── Coach: Clients ───────────────────────────────────────────────────────────
 $router->get('/coach/clients',                  [ClientController::class, 'index'],          [CoachMiddleware::class]);
-$router->post('/coach/clients',                 [ClientController::class, 'store'],          [CoachMiddleware::class, SubscriptionMiddleware::class]);
+$router->post('/coach/clients',                 [ClientController::class, 'store'],          [CoachMiddleware::class]);
 $router->get('/coach/clients/:id',              [ClientController::class, 'show'],           [CoachMiddleware::class]);
 $router->put('/coach/clients/:id',              [ClientController::class, 'update'],         [CoachMiddleware::class]);
 $router->delete('/coach/clients/:id',           [ClientController::class, 'destroy'],        [CoachMiddleware::class]);

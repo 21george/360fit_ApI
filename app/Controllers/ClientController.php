@@ -191,7 +191,11 @@ class ClientController
         $cap   = SubscriptionController::getClientLimit($tier);
         $count = $col->countDocuments(['coach_id' => $coachId, 'active' => true]);
         if ($count >= $cap) {
-            Response::error("Client limit of {$cap} reached. Upgrade your plan to add more clients.", 403);
+            Response::error(
+                "Client limit reached ({$count}/{$cap}). Upgrade your plan to add more clients.",
+                403,
+                ['tier' => $tier, 'limit' => $cap, 'current' => $count, 'upgrade_required' => true]
+            );
         }
 
         $code      = CodeService::generate();
@@ -209,6 +213,10 @@ class ClientController
             'postal_code'       => $body['postal_code'] ?? null,
             'nationality'       => $body['nationality'] ?? null,
             'occupation'        => $body['occupation'] ?? null,
+            'date_of_birth'     => $body['date_of_birth'] ?? null,
+            'current_weight_kg' => isset($body['current_weight_kg']) ? (float) $body['current_weight_kg'] : null,
+            'height_cm'         => isset($body['height_cm']) ? (int) $body['height_cm'] : null,
+            'sickness'          => $body['sickness'] ?? null,
             'login_code_hash'   => $codeHash,
             'code_lookup'       => $codeLookup,
             'active'            => true,
@@ -249,7 +257,7 @@ class ClientController
     {
         $client  = $this->findClient($params, includeBlocked: true);
         $body    = Request::body();
-        $allowed = ['name', 'email', 'phone', 'language', 'notes', 'address', 'city', 'postal_code', 'nationality', 'occupation'];
+        $allowed = ['name', 'email', 'phone', 'language', 'notes', 'address', 'city', 'postal_code', 'nationality', 'occupation', 'date_of_birth', 'current_weight_kg', 'height_cm', 'sickness'];
         $set     = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
 
         foreach ($allowed as $field) {
@@ -453,6 +461,10 @@ class ClientController
             'postal_code'       => $doc['postal_code'] ?? null,
             'nationality'       => $doc['nationality'] ?? null,
             'occupation'        => $doc['occupation'] ?? null,
+            'date_of_birth'     => $doc['date_of_birth'] ?? null,
+            'current_weight_kg' => $doc['current_weight_kg'] ?? null,
+            'height_cm'         => $doc['height_cm'] ?? null,
+            'sickness'          => $doc['sickness'] ?? null,
             'profile_photo_url' => $doc['profile_photo_url'] ?? null,
             'notes'             => $doc['notes'] ?? null,
             'active'            => $doc['active'],

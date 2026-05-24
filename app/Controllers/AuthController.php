@@ -104,8 +104,12 @@ class AuthController
             'coach'         => [
                 'id'                  => (string) $coach['_id'],
                 'name'                => $coach['name'],
+                'surname'             => $coach['surname'] ?? null,
                 'email'               => $coach['email'],
                 'language'            => $coach['language'] ?? 'en',
+                'profile_photo'       => $coach['profile_photo'] ?? null,
+                'phone'               => $coach['phone'] ?? null,
+                'bio'                 => $coach['bio'] ?? null,
                 'subscription_status' => $subscriptionStatus,
                 'subscription_alert'  => $subscriptionAlert,
                 'cancel_at_period_end'=> $coach['cancel_at_period_end'] ?? false,
