@@ -151,7 +151,7 @@ class NotificationsController
         $type = Request::get('type');
         $unreadOnly = Request::get('unread') === 'true';
 
-        $filter = ['user_id' => $coachId];
+        $filter = ['user_id' => $coachId, 'user_type' => 'coach'];
         if (is_string($type) && $type !== '') {
             $filter['type'] = $type;
         }
@@ -191,6 +191,7 @@ class NotificationsController
 
         $count = $collection->countDocuments([
             'user_id' => $coachId,
+            'user_type' => 'coach',
             'read' => false,
         ]);
 
@@ -216,6 +217,7 @@ class NotificationsController
         $notification = $collection->findOne([
             '_id' => $notificationId,
             'user_id' => $coachId,
+            'user_type' => 'coach',
         ]);
 
         if (!$notification) {
@@ -247,7 +249,7 @@ class NotificationsController
         $collection = Database::collection('notifications');
 
         $result = $collection->updateMany(
-            ['user_id' => $coachId, 'read' => false],
+            ['user_id' => $coachId, 'user_type' => 'coach', 'read' => false],
             ['$set' => ['read' => true]]
         );
 
@@ -273,6 +275,7 @@ class NotificationsController
         $result = $collection->deleteOne([
             '_id' => $notificationId,
             'user_id' => $coachId,
+            'user_type' => 'coach',
         ]);
 
         if ($result->getDeletedCount() === 0) {

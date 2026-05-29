@@ -273,7 +273,7 @@ class CoachController {
             'job_title'              => $coach['job_title'] ?? '',
             'responsibilities'       => $coach['responsibilities'] ?? '',
             'client_count'           => $coach['client_count'] ?? 0,
-            'max_clients'            => \App\Controllers\SubscriptionController::getClientLimit($tier),
+            'max_clients'            => SubscriptionController::getClientLimit($tier),
             'subscription_tier'      => $tier,
             'subscription_status'    => $coach['subscription_status'] ?? 'none',
             'trial_ends_at'          => isset($coach['trial_ends_at']) ? (string) $coach['trial_ends_at'] : null,

@@ -21,6 +21,13 @@ class MessageController
         $coachId  = new ObjectId($params['_auth']['sub']);
         $clientId = new ObjectId($params['clientId']);
         $this->verifyClientOwnership($coachId, $clientId);
+
+        // Mark client messages as read BEFORE sending the response (getThread calls exit())
+        Database::collection('messages')->updateMany(
+            ['client_id' => $clientId, 'sender_role' => 'client', 'read' => false],
+            ['$set' => ['read' => true]]
+        );
+
         $this->getThread($clientId, $coachId);
     }
 
@@ -333,7 +340,10 @@ class MessageController
 
     private function verifyClientOwnership(ObjectId $coachId, ObjectId $clientId): void
     {
-        $client = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
+        $client = Database::collection('clients')->findOne([
+            '_id'      => $clientId,
+            'coach_id' => $this->buildCoachIdFilter($coachId),
+        ]);
         if (!$client) Response::error('Client not found', 404);
     }
 
@@ -352,6 +362,7 @@ class MessageController
         )->toArray();
 
         $clients = [];
+        $result  = [];
         foreach ($messages as $msg) {
             $clientId = (string) $msg['client_id'];
             if (!isset($clients[$clientId])) {
@@ -360,21 +371,24 @@ class MessageController
                     ['projection' => ['name' => 1, 'profile_photo' => 1]]
                 );
                 $clients[$clientId] = [
-                    'client_id'   => $clientId,
-                    'client_name' => $client['name'] ?? 'Unknown',
+                    'client_name'   => $client['name'] ?? 'Unknown',
                     'profile_photo' => $client['profile_photo'] ?? null,
-                    'messages'    => [],
                 ];
             }
-            $clients[$clientId]['messages'][] = [
-                'id'       => (string) $msg['_id'],
-                'content'  => $msg['content'] ?? '',
-                'sent_at'  => $this->formatDateValue($msg['sent_at'] ?? null),
+            $result[] = [
+                'id'          => (string) $msg['_id'],
+                'client_id'   => $clientId,
+                'client_name' => $clients[$clientId]['client_name'],
+                'content'     => $msg['content'] ?? '',
+                'media_url'   => $msg['media_url'] ?? null,
+                'media_type'  => $msg['media_type'] ?? null,
+                'sender_role' => $msg['sender_role'] ?? 'client',
+                'sent_at'     => $this->formatDateValue($msg['sent_at'] ?? null),
             ];
         }
 
         Response::success([
-            'messages' => array_values($clients),
+            'messages' => $result,
             'count'    => count($messages),
         ]);
     }
@@ -392,15 +406,29 @@ class MessageController
 
         $clients = Database::collection('messages')->aggregate([
             ['$match' => ['coach_id' => $coachId, 'sender_role' => 'client', 'read' => false]],
-            ['$group' => ['_id' => '$client_id', 'count' => ['$sum' => 1], 'last_message' => ['$last' => '$content']]],
+            ['$sort' => ['sent_at' => -1]],
+            ['$group' => ['_id' => '$client_id', 'count' => ['$sum' => 1], 'last_message' => ['$first' => '$content'], 'last_sent_at' => ['$first' => '$sent_at']]],
             ['$sort' => ['count' => -1]],
         ])->toArray();
 
+        $clientIds = array_map(fn($c) => $c['_id'], $clients);
+        $clientDocs = [];
+        if (!empty($clientIds)) {
+            $docs = Database::collection('clients')->find(
+                ['_id' => ['$in' => $clientIds]],
+                ['projection' => ['name' => 1]]
+            )->toArray();
+            foreach ($docs as $doc) {
+                $clientDocs[(string) $doc['_id']] = $doc['name'] ?? 'Unknown';
+            }
+        }
+
         $result = array_map(fn($c) => [
             'client_id'    => (string) $c['_id'],
-            'client_name'  => (Database::collection('clients')->findOne(['_id' => $c['_id']])['name'] ?? 'Unknown'),
+            'client_name'  => $clientDocs[(string) $c['_id']] ?? 'Unknown',
             'count'        => $c['count'],
             'last_message' => $c['last_message'] ?? '',
+            'sent_at'      => $this->formatDateValue($c['last_sent_at'] ?? null),
         ], $clients);
 
         Response::success(['count' => $count, 'clients' => $result]);

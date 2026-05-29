@@ -145,16 +145,25 @@ class ClientController
         $search   = Request::get('search', '');
         $page     = max(1, (int) Request::get('page', 1));
         $perPage  = 20;
-        $filter   = ['coach_id' => $coachId];
 
-        // Include both active and blocked clients (exclude only soft-deleted)
-        $filter['active'] = ['$in' => [true, false]];
+        // Show active clients and blocked clients; exclude soft-deleted (active=false, is_blocked=false)
+        $filter = [
+            '$and' => [
+                ['coach_id' => $coachId],
+                ['$or' => [
+                    ['active' => true],
+                    ['is_blocked' => true],
+                ]],
+            ],
+        ];
 
         if ($search) {
             $escaped = preg_quote($search, '/');
-            $filter['$or'] = [
-                ['name'  => ['$regex' => $escaped, '$options' => 'i']],
-                ['email' => ['$regex' => $escaped, '$options' => 'i']],
+            $filter['$and'][] = [
+                '$or' => [
+                    ['name'  => ['$regex' => $escaped, '$options' => 'i']],
+                    ['email' => ['$regex' => $escaped, '$options' => 'i']],
+                ],
             ];
         }
 
@@ -184,19 +193,6 @@ class ClientController
         if ($errors) Response::error('Validation failed', 422, $errors);
 
         $col = Database::collection('clients');
-
-        // Use subscription tier limit
-        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        $tier  = $coach['subscription_tier'] ?? 'free';
-        $cap   = SubscriptionController::getClientLimit($tier);
-        $count = $col->countDocuments(['coach_id' => $coachId, 'active' => true]);
-        if ($count >= $cap) {
-            Response::error(
-                "Client limit reached ({$count}/{$cap}). Upgrade your plan to add more clients.",
-                403,
-                ['tier' => $tier, 'limit' => $cap, 'current' => $count, 'upgrade_required' => true]
-            );
-        }
 
         $code      = CodeService::generate();
         $codeHash  = CodeService::hash($code);
@@ -243,6 +239,87 @@ class ClientController
             'login_code' => $code,  // shown ONCE to coach
             'email_sent' => $emailSent,
         ], 'Client created', 201);
+    }
+
+    // POST /coach/clients/import
+    public function import(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $body    = Request::body();
+        $rows    = $body['clients'] ?? [];
+
+        if (!is_array($rows) || empty($rows)) {
+            Response::error('No clients provided. Expecting {clients: [...]}', 422);
+        }
+
+        $col       = Database::collection('clients');
+        $created   = 0;
+        $failed    = 0;
+        $errors    = [];
+        $loginCodes = [];
+
+        foreach ($rows as $idx => $row) {
+            $name = trim($row['name'] ?? $row['full_name'] ?? '');
+            if (empty($name)) {
+                $failed++;
+                $errors[] = ['index' => $idx, 'field' => 'name', 'message' => 'Name is required'];
+                continue;
+            }
+
+            $code       = CodeService::generate();
+            $codeHash   = CodeService::hash($code);
+            $codeLookup = CodeService::lookupHash($code);
+
+            // Age → date_of_birth (approximate: Jan 1 of birth year)
+            $dob = null;
+            $age = isset($row['age']) ? (int) $row['age'] : null;
+            if ($age !== null && $age > 0) {
+                $birthYear = (int) date('Y') - $age;
+                $dob = "{$birthYear}-01-01";
+            }
+
+            try {
+                $result = $col->insertOne([
+                    'coach_id'          => $coachId,
+                    'name'              => $name,
+                    'email'             => !empty($row['email']) ? trim((string) $row['email']) : null,
+                    'phone'             => $row['phone'] ?? null,
+                    'language'          => 'en',
+                    'address'           => $row['address'] ?? null,
+                    'city'              => !empty($row['location']) ? trim((string) $row['location']) : ($row['city'] ?? null),
+                    'postal_code'       => $row['postal_code'] ?? null,
+                    'nationality'       => $row['nationality'] ?? null,
+                    'occupation'        => $row['occupation'] ?? null,
+                    'date_of_birth'     => $dob ?? ($row['date_of_birth'] ?? null),
+                    'current_weight_kg' => isset($row['weight']) ? (float) $row['weight'] : (isset($row['current_weight_kg']) ? (float) $row['current_weight_kg'] : null),
+                    'height_cm'         => isset($row['height']) ? (int) $row['height'] : (isset($row['height_cm']) ? (int) $row['height_cm'] : null),
+                    'sickness'          => $row['sickness'] ?? null,
+                    'login_code_hash'   => $codeHash,
+                    'code_lookup'       => $codeLookup,
+                    'active'            => true,
+                    'is_blocked'        => false,
+                    'token_version'     => 0,
+                    'fcm_token'         => null,
+                    'profile_photo_url' => null,
+                    'notes'             => $row['notes'] ?? null,
+                    'created_at'        => new \MongoDB\BSON\UTCDateTime(),
+                    'updated_at'        => new \MongoDB\BSON\UTCDateTime(),
+                ]);
+                $created++;
+                $loginCodes[] = ['id' => (string) $result->getInsertedId(), 'name' => $name, 'login_code' => $code];
+            } catch (\Throwable $e) {
+                $failed++;
+                $errors[] = ['index' => $idx, 'field' => null, 'message' => $e->getMessage()];
+            }
+        }
+
+        Response::success([
+            'created'     => $created,
+            'failed'      => $failed,
+            'total'       => count($rows),
+            'errors'      => $errors,
+            'login_codes' => $loginCodes,
+        ], "Imported {$created} of " . count($rows) . ' clients', $failed > 0 ? 207 : 200);
     }
 
     // GET /coach/clients/:id

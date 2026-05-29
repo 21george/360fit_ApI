@@ -7,6 +7,7 @@ $origins = array_filter([
     'https://frontend-g-delta.vercel.app',
     'http://localhost:3000',
     'http://localhost:3001',
+    'http://localhost:3002',
     'http://localhost:19006',
 ]);
 
@@ -17,6 +18,8 @@ $origins = array_map(fn(string $o) => rtrim($o, '/'), $origins);
 if ($isDev) {
     $origins[] = 'http://localhost:3000';
     $origins[] = 'http://localhost:3001';
+    $origins[] = 'http://localhost:3002';
+    $origins[] = 'http://localhost:3003';
     $origins[] = 'http://localhost:19006';
     $origins[] = 'exp://localhost:19000';
 }

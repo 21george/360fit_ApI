@@ -15,7 +15,13 @@ class NutritionController
         $coachId  = new ObjectId($params['_auth']['sub']);
         $clientId = Request::get('client_id');
         $filter   = ['coach_id' => $coachId];
-        if ($clientId) $filter['client_id'] = new ObjectId($clientId);
+        if ($clientId) {
+            $oid = new ObjectId($clientId);
+            $filter['$or'] = [
+                ['client_id' => $oid],
+                ['client_ids' => $oid],
+            ];
+        }
 
         $plans = Database::collection('nutrition_plans')->find($filter, [
             'sort'       => ['created_at' => -1],
@@ -94,12 +100,94 @@ class NutritionController
         Response::success(null, 'Nutrition plan deleted');
     }
 
+    // POST /nutrition-plans/:id/assign
+    public function assign(array $params): void
+    {
+        try {
+            $coachId = new ObjectId($params['_auth']['sub']);
+            $planId  = new ObjectId($params['id']);
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+            Response::error('Invalid plan ID', 400);
+            return;
+        }
+
+        $body = Request::body();
+
+        $plan = Database::collection('nutrition_plans')->findOne([
+            '_id'      => $planId,
+            'coach_id' => $coachId,
+        ]);
+        if (!$plan) {
+            Response::error('Plan not found or access denied', 404);
+            return;
+        }
+
+        $clientIds = $body['client_ids'] ?? ($body['client_id'] ?? null);
+        if (empty($clientIds)) {
+            Response::error('client_ids is required', 422);
+            return;
+        }
+
+        if (!is_array($clientIds)) {
+            $clientIds = [$clientIds];
+        }
+
+        $clientObjects = [];
+        foreach ($clientIds as $id) {
+            try {
+                $clientId = $id instanceof ObjectId ? $id : new ObjectId((string) $id);
+            } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+                Response::error('Invalid client ID: ' . (string) $id, 400);
+                return;
+            }
+
+            $client = Database::collection('clients')->findOne([
+                '_id'      => $clientId,
+                'coach_id' => $coachId,
+            ]);
+            if (!$client) {
+                Response::error('Client not found: ' . (string) $id, 404);
+                return;
+            }
+            $clientObjects[] = $client;
+        }
+
+        $isGroup = count($clientIds) > 1;
+        $update = [
+            'plan_type'  => $isGroup ? 'group' : 'individual',
+            'updated_at' => new \MongoDB\BSON\UTCDateTime(),
+        ];
+
+        if ($isGroup) {
+            $update['client_ids'] = array_map(fn($c) => $c['_id'], $clientObjects);
+            $update['client_id'] = null;
+        } else {
+            $update['client_id'] = $clientObjects[0]['_id'];
+            $update['client_ids'] = [];
+        }
+
+        Database::collection('nutrition_plans')->updateOne(
+            ['_id' => $planId],
+            ['$set' => $update]
+        );
+
+        Response::success([
+            'client_ids' => array_map(fn($c) => (string) $c['_id'], $clientObjects),
+            'plan_type'  => $isGroup ? 'group' : 'individual',
+        ], 'Nutrition plan assigned to ' . count($clientObjects) . ' client(s)');
+    }
+
     // GET /client/nutrition-plan  (client)
     public function clientPlan(array $params): void
     {
         $clientId = new ObjectId($params['_auth']['sub']);
         $plan     = Database::collection('nutrition_plans')->findOne(
-            ['client_id' => $clientId],
+            [
+                '$or' => [
+                    ['client_id' => $clientId],
+                    ['client_ids' => $clientId],
+                ],
+            ],
             ['sort' => ['week_start' => -1]]
         );
         if (!$plan) Response::error('No nutrition plan assigned', 404);
@@ -120,14 +208,39 @@ class NutritionController
 
     private function format(object $doc, bool $full = false): array
     {
+        $clientIds = [];
+        if (!empty($doc['client_ids'])) {
+            foreach ($doc['client_ids'] as $cid) {
+                $clientIds[] = (string) $cid;
+            }
+        }
+
+        $assignedClient = null;
+        if (!empty($doc['client_id'])) {
+            $client = Database::collection('clients')->findOne(
+                ['_id' => $doc['client_id']],
+                ['projection' => ['name' => 1, 'profile_photo_url' => 1]]
+            );
+            if ($client) {
+                $assignedClient = [
+                    'id'                => (string) $client['_id'],
+                    'name'              => $client['name'],
+                    'profile_photo_url' => $client['profile_photo_url'] ?? null,
+                ];
+            }
+        }
+
         $data = [
-            'id'           => (string) $doc['_id'],
-            'client_id'    => (string) $doc['client_id'],
-            'title'        => $doc['title'],
-            'week_start'   => $doc['week_start'] ? date('Y-m-d', (int)((string)$doc['week_start']) / 1000) : null,
-            'daily_totals' => $doc['daily_totals'] ?? [],
-            'notes'        => $doc['notes'] ?? null,
-            'created_at'   => (string) ($doc['created_at'] ?? ''),
+            'id'              => (string) $doc['_id'],
+            'plan_type'       => (string) ($doc['plan_type'] ?? 'individual'),
+            'client_id'       => isset($doc['client_id']) ? (string) $doc['client_id'] : null,
+            'client_ids'      => $clientIds,
+            'assigned_client' => $assignedClient,
+            'title'           => $doc['title'],
+            'week_start'      => $doc['week_start'] ? date('Y-m-d', (int)((string)$doc['week_start']) / 1000) : null,
+            'daily_totals'    => $doc['daily_totals'] ?? [],
+            'notes'           => $doc['notes'] ?? null,
+            'created_at'      => (string) ($doc['created_at'] ?? ''),
         ];
         if ($full) $data['days'] = $doc['days'] ?? [];
         return $data;

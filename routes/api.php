@@ -15,6 +15,7 @@ use App\Controllers\{
     GroupChatController,
     LiveTrainingController,
     SubscriptionController,
+    SettingsController,
     NotificationsController
 };
 use App\Middleware\{AuthMiddleware, CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SetupAuthMiddleware};
@@ -52,6 +53,7 @@ $router->get('/coaches/registered', [CoachController::class, 'index'], [CoachMid
 // ─── Coach: Clients ───────────────────────────────────────────────────────────
 $router->get('/coach/clients',                  [ClientController::class, 'index'],          [CoachMiddleware::class]);
 $router->post('/coach/clients',                 [ClientController::class, 'store'],          [CoachMiddleware::class]);
+$router->post('/coach/clients/import',          [ClientController::class, 'import'],         [CoachMiddleware::class]);
 $router->get('/coach/clients/:id',              [ClientController::class, 'show'],           [CoachMiddleware::class]);
 $router->put('/coach/clients/:id',              [ClientController::class, 'update'],         [CoachMiddleware::class]);
 $router->delete('/coach/clients/:id',           [ClientController::class, 'destroy'],        [CoachMiddleware::class]);
@@ -59,6 +61,7 @@ $router->post('/coach/clients/:id/regenerate-code', [ClientController::class, 'r
 $router->post('/coach/clients/:id/block',   [ClientController::class, 'block'],   [CoachMiddleware::class]);
 $router->post('/coach/clients/:id/unblock', [ClientController::class, 'unblock'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/analytics',   [ClientController::class, 'analytics'],      [CoachMiddleware::class]);
+$router->get('/analytics/coach',                [AnalyticsController::class, 'coachAnalytics'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/logs',        [WorkoutLogController::class, 'clientLogs'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/workout-progress', [WorkoutLogController::class, 'clientWorkoutProgress'], [CoachMiddleware::class]);
 $router->post('/coach/clients/:id/measurements',[MediaController::class, 'storeMeasurement'],[CoachMiddleware::class]);
@@ -81,6 +84,7 @@ $router->post('/nutrition-plans',    [NutritionController::class, 'store'],  [Co
 $router->get('/nutrition-plans/:id',    [NutritionController::class, 'show'],    [CoachMiddleware::class]);
 $router->put('/nutrition-plans/:id',    [NutritionController::class, 'update'],  [CoachMiddleware::class]);
 $router->delete('/nutrition-plans/:id', [NutritionController::class, 'destroy'], [CoachMiddleware::class]);
+$router->post('/nutrition-plans/:id/assign', [NutritionController::class, 'assign'], [CoachMiddleware::class]);
 
 // ─── Coach: Check-ins ─────────────────────────────────────────────────────────
 $router->get('/checkins',      [CheckinController::class, 'index'],   [CoachMiddleware::class]);
@@ -154,10 +158,29 @@ $router->get('/client/analytics',                   [AnalyticsController::class,
 // ─── Subscription ─────────────────────────────────────────────────────────────
 $router->post('/subscription/select-plan', [SubscriptionController::class, 'selectPlan'], [SetupAuthMiddleware::class]);
 $router->get('/subscription',          [SubscriptionController::class, 'status'],   [CoachMiddleware::class]);
+$router->get('/subscription/invoices', [SubscriptionController::class, 'invoices'], [CoachMiddleware::class]);
+$router->post('/subscription/upgrade',  [SubscriptionController::class, 'upgrade'],  [CoachMiddleware::class]);
 $router->post('/subscription/checkout',[SubscriptionController::class, 'checkout'], [CoachMiddleware::class]);
 $router->post('/subscription/portal',  [SubscriptionController::class, 'portal'],   [CoachMiddleware::class]);
 $router->post('/subscription/cancel',  [SubscriptionController::class, 'cancel'],   [CoachMiddleware::class]);
+$router->get('/subscription/invoices/:id/download', [SubscriptionController::class, 'downloadInvoice'], [CoachMiddleware::class]);
 $router->post('/subscription/webhook', [SubscriptionController::class, 'webhook']);
+
+// ─── Payment Methods ──────────────────────────────────────────────────────────
+$router->post('/payment-methods/setup-intent',    [SettingsController::class, 'createSetupIntent'],    [CoachMiddleware::class]);
+$router->get('/payment-methods',                  [SettingsController::class, 'listPaymentMethods'],   [CoachMiddleware::class]);
+$router->post('/payment-methods',                [SettingsController::class, 'addPaymentMethod'],      [CoachMiddleware::class]);
+$router->delete('/payment-methods/:id',           [SettingsController::class, 'deletePaymentMethod'],   [CoachMiddleware::class]);
+$router->post('/payment-methods/:id/default',     [SettingsController::class, 'setDefaultPaymentMethod'], [CoachMiddleware::class]);
+
+// ─── Integrations & Support ────────────────────────────────────────────────────
+$router->get('/integrations/settings',          [SettingsController::class, 'getIntegrations'],      [CoachMiddleware::class]);
+$router->put('/integrations/settings',           [SettingsController::class, 'updateIntegrations'],   [CoachMiddleware::class]);
+$router->post('/support/contact',                  [SettingsController::class, 'createSupportTicket'],  [CoachMiddleware::class]);
+
+// ─── Notification Settings ─────────────────────────────────────────────────────
+$router->get('/notification-settings',              [SettingsController::class, 'getNotifications'],     [CoachMiddleware::class]);
+$router->put('/notification-settings',              [SettingsController::class, 'updateNotifications'], [CoachMiddleware::class]);
 
 // ─── Notifications ──────────────────────────────────────────────────────────────
 require_once BASE_PATH . '/routes/notifications.php';

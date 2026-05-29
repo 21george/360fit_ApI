@@ -17,7 +17,17 @@ class SetupAuthMiddleware
             Response::error('Unauthorized: No setup token provided', 401);
         }
 
+        // First: try setup token (signup flow)
         $coachId = JwtService::verifySetupToken($token);
+
+        // Fallback: accept regular access token for already-authenticated pending coaches
+        if (!$coachId) {
+            $payload = JwtService::verifyAccessToken($token);
+            if ($payload) {
+                $coachId = $payload['sub'] ?? null;
+            }
+        }
+
         if (!$coachId) {
             Response::error('Unauthorized: Invalid or expired setup token', 401);
         }

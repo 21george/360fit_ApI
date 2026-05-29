@@ -309,4 +309,109 @@ class AnalyticsController
             'weekly_volume'     => array_values($weeklyVolume),
         ]);
     }
+
+    // GET /analytics/coach
+    public function coachAnalytics(array $params): void
+    {
+        $user     = $params['_auth'];
+        $coachId  = new ObjectId($user['sub']);
+
+        if ($user['role'] !== 'coach') Response::error('Forbidden', 403);
+
+        $clientsCol = Database::collection('clients');
+        $logsCol    = Database::collection('workout_logs');
+        $plansCol   = Database::collection('workout_plans');
+
+        // All clients
+        $clients = $clientsCol->find(['coach_id' => $coachId, 'active' => true]);
+        $clientIds = [];
+        $clientObjIds = [];
+        $totalClients = 0;
+        $newClientsThisMonth = 0;
+        $now = new \DateTime();
+        $monthStart = new \DateTime('first day of this month midnight');
+
+        foreach ($clients as $c) {
+            $totalClients++;
+            $cid = (string) $c['_id'];
+            $clientIds[] = $cid;
+            $clientObjIds[] = new ObjectId($cid);
+            if (isset($c['created_at'])) {
+                $created = $c['created_at']->toDateTime();
+                if ($created >= $monthStart) {
+                    $newClientsThisMonth++;
+                }
+            }
+        }
+
+        // Active clients (worked out in last 7 days)
+        $sevenDaysAgo = new UTCDateTime((new \DateTime('-7 days'))->getTimestamp() * 1000);
+        $activeClientIds = [];
+        if (!empty($clientObjIds)) {
+            $activeLogs = $logsCol->find([
+                'client_id'    => ['$in' => $clientObjIds],
+                'completed_at' => ['$gte' => $sevenDaysAgo],
+            ], ['projection' => ['client_id' => 1]]);
+            foreach ($activeLogs as $log) {
+                $activeClientIds[(string) $log['client_id']] = true;
+            }
+        }
+        $activeClients = count($activeClientIds);
+
+        // Total workouts
+        $totalWorkouts = $logsCol->countDocuments(['client_id' => ['$in' => $clientObjIds]]);
+
+        // Completion rate across all clients
+        $totalPlanned = 0;
+        $totalDone    = 0;
+        if (!empty($clientObjIds)) {
+            $plans = $plansCol->find(['client_id' => ['$in' => $clientObjIds]]);
+            foreach ($plans as $plan) {
+                $td = count($plan['days'] ?? []);
+                $cd = $logsCol->countDocuments([
+                    'client_id'       => $plan['client_id'],
+                    'workout_plan_id' => $plan['_id'],
+                ]);
+                $totalPlanned += $td;
+                $totalDone    += $cd;
+            }
+        }
+        $completionRate = $totalPlanned > 0 ? round(($totalDone / $totalPlanned) * 100) : 0;
+
+        // Top clients by workout volume (last 30 days)
+        $thirtyDaysAgo = new UTCDateTime((new \DateTime('-30 days'))->getTimestamp() * 1000);
+        $topClients = [];
+        if (!empty($clientObjIds)) {
+            $pipeline = [
+                ['$match' => [
+                    'client_id'    => ['$in' => $clientObjIds],
+                    'completed_at' => ['$gte' => $thirtyDaysAgo],
+                ]],
+                ['$group' => [
+                    '_id'       => '$client_id',
+                    'sessions'  => ['$sum' => 1],
+                ]],
+                ['$sort'  => ['sessions' => -1]],
+                ['$limit' => 5],
+            ];
+            $agg = $logsCol->aggregate($pipeline);
+            foreach ($agg as $doc) {
+                $client = $clientsCol->findOne(['_id' => $doc['_id']], ['projection' => ['name' => 1]]);
+                $topClients[] = [
+                    'id'       => (string) $doc['_id'],
+                    'name'     => $client['name'] ?? 'Unknown',
+                    'sessions' => $doc['sessions'],
+                ];
+            }
+        }
+
+        Response::success([
+            'total_clients'         => $totalClients,
+            'active_clients'        => $activeClients,
+            'new_clients_this_month'=> $newClientsThisMonth,
+            'total_workouts'        => $totalWorkouts,
+            'completion_rate'       => $completionRate,
+            'top_clients'           => $topClients,
+        ]);
+    }
 }

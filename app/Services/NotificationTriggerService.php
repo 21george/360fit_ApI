@@ -26,6 +26,221 @@ class NotificationTriggerService
     }
 
     /**
+     * Notify client when a new check-in is scheduled
+     */
+    public function notifyClientNewCheckin(string $clientId, string $scheduledAt, string $type, ?string $checkinId = null): void
+    {
+        $formattedTime = date('M j, g:i A', strtotime($scheduledAt));
+        $typeLabel = $type === 'call' ? 'Call' : ($type === 'video' ? 'Video' : 'Chat');
+
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'new_checkin',
+            'title'      => 'Meeting Scheduled',
+            'body'       => "{$typeLabel} check-in scheduled for {$formattedTime}",
+            'data'       => [
+                'checkinId'    => $checkinId,
+                'scheduledAt'  => $scheduledAt,
+                'type'         => $type,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify coach when client responds to a check-in
+     */
+    public function notifyCoachCheckinResponse(string $clientId, string $clientName, string $response, string $checkinId, string $scheduledAt): void
+    {
+        $coach = $this->getCoachByClientId($clientId);
+        if (!$coach) return;
+
+        $formattedTime = date('M j, g:i A', strtotime($scheduledAt));
+        $isAccepted = $response === 'accepted';
+        $title = $isAccepted ? 'Check-in Accepted' : 'Check-in Declined';
+        $body = $isAccepted
+            ? "{$clientName} accepted the check-in at {$formattedTime}"
+            : "{$clientName} declined the check-in at {$formattedTime}";
+
+        $notification = [
+            'user_id'    => new ObjectId($coach['_id']),
+            'user_type'  => 'coach',
+            'type'       => $isAccepted ? 'checkin_accepted' : 'checkin_declined',
+            'title'      => $title,
+            'body'       => $body,
+            'data'       => [
+                'checkinId'    => $checkinId,
+                'clientId'     => $clientId,
+                'clientName'   => $clientName,
+                'response'     => $response,
+                'scheduledAt'  => $scheduledAt,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToCoach($coach['_id'], $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify coach when client requests to reschedule a check-in
+     */
+    public function notifyCoachCheckinReschedule(string $clientId, string $clientName, string $checkinId, string $proposedAt, ?string $note = null): void
+    {
+        $coach = $this->getCoachByClientId($clientId);
+        if (!$coach) return;
+
+        $formattedTime = date('M j, g:i A', strtotime($proposedAt));
+        $body = "{$clientName} requested to reschedule to {$formattedTime}";
+        if ($note) {
+            $body .= ": {$note}";
+        }
+
+        $notification = [
+            'user_id'    => new ObjectId($coach['_id']),
+            'user_type'  => 'coach',
+            'type'       => 'checkin_reschedule',
+            'title'      => 'Reschedule Request',
+            'body'       => $body,
+            'data'       => [
+                'checkinId'    => $checkinId,
+                'clientId'     => $clientId,
+                'clientName'   => $clientName,
+                'proposedAt'   => $proposedAt,
+                'note'         => $note,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToCoach($coach['_id'], $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify coach when a client requests to join a live session
+     */
+    public function notifyCoachJoinRequest(string $clientId, string $clientName, string $sessionId, string $sessionTitle, string $scheduledAt): void
+    {
+        $coach = $this->getCoachByClientId($clientId);
+        if (!$coach) return;
+
+        $formattedTime = date('M j, g:i A', strtotime($scheduledAt));
+        $notification = [
+            'user_id'    => new ObjectId($coach['_id']),
+            'user_type'  => 'coach',
+            'type'       => 'join_request',
+            'title'      => 'New Join Request',
+            'body'       => "{$clientName} requested to join \"{$sessionTitle}\" at {$formattedTime}",
+            'data'       => [
+                'sessionId'    => $sessionId,
+                'sessionTitle' => $sessionTitle,
+                'clientId'     => $clientId,
+                'clientName'   => $clientName,
+                'scheduledAt'  => $scheduledAt,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToCoach($coach['_id'], $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify coach when a client joins a live session directly
+     */
+    public function notifyCoachDirectJoin(string $clientId, string $clientName, string $sessionId, string $sessionTitle, string $scheduledAt): void
+    {
+        $coach = $this->getCoachByClientId($clientId);
+        if (!$coach) return;
+
+        $formattedTime = date('M j, g:i A', strtotime($scheduledAt));
+        $notification = [
+            'user_id'    => new ObjectId($coach['_id']),
+            'user_type'  => 'coach',
+            'type'       => 'participant_joined',
+            'title'      => 'New Participant',
+            'body'       => "{$clientName} joined \"{$sessionTitle}\" at {$formattedTime}",
+            'data'       => [
+                'sessionId'    => $sessionId,
+                'sessionTitle' => $sessionTitle,
+                'clientId'     => $clientId,
+                'clientName'   => $clientName,
+                'scheduledAt'  => $scheduledAt,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToCoach($coach['_id'], $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify client when coach approves their join request
+     */
+    public function notifyClientJoinApproved(string $coachName, string $clientId, string $sessionId, string $sessionTitle, string $scheduledAt): void
+    {
+        $formattedTime = date('M j, g:i A', strtotime($scheduledAt));
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'join_approved',
+            'title'      => 'Join Approved',
+            'body'       => "{$coachName} approved your request to join \"{$sessionTitle}\" at {$formattedTime}",
+            'data'       => [
+                'sessionId'    => $sessionId,
+                'sessionTitle' => $sessionTitle,
+                'coachName'    => $coachName,
+                'scheduledAt'  => $scheduledAt,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify client when coach rejects their join request
+     */
+    public function notifyClientJoinRejected(string $coachName, string $clientId, string $sessionId, string $sessionTitle): void
+    {
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'join_rejected',
+            'title'      => 'Join Request Declined',
+            'body'       => "{$coachName} declined your request to join \"{$sessionTitle}\"",
+            'data'       => [
+                'sessionId'    => $sessionId,
+                'sessionTitle' => $sessionTitle,
+                'coachName'    => $coachName,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
      * Notify coach when a client completes a workout
      */
     public function notifyWorkoutCompleted(string $clientId, string $clientName, string $workoutPlanName, ?string $workoutLogId = null): void

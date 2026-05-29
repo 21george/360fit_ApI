@@ -313,10 +313,6 @@ class WorkoutPlanController
                 Response::error('Client not found: ' . (string) $id, 404);
                 return;
             }
-            if (!($client['active'] ?? true)) {
-                Response::error('Client is inactive: ' . (string) $id, 422);
-                return;
-            }
             $clientObjects[] = $client;
         }
 

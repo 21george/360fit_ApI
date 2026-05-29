@@ -241,11 +241,48 @@ class LiveTrainingController
             ['$set' => ['status' => $action, 'updated_at' => new UTCDateTime()]]
         );
 
+        $triggerService = new NotificationTriggerService();
+        $client = Database::collection('clients')->findOne(['_id' => $req['client_id']]);
+        $clientName = $client['name'] ?? 'A client';
+        $scheduledAtStr = isset($session['scheduled_at'])
+            ? date('Y-m-d H:i:s', intdiv((int) ((string) $session['scheduled_at']), 1000))
+            : '';
+
         // If approved, add to participant list
         if ($action === 'approved') {
             Database::collection('live_training_sessions')->updateOne(
                 ['_id' => $session['_id']],
                 ['$addToSet' => ['participant_ids' => $req['client_id']]]
+            );
+
+            // Notify client of approval
+            $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+            $coachName = $coach['name'] ?? 'Your coach';
+            $triggerService->notifyClientJoinApproved(
+                $coachName,
+                (string) $req['client_id'],
+                (string) $session['_id'],
+                $session['title'] ?? 'Live Session',
+                $scheduledAtStr
+            );
+
+            // Schedule reminder for the newly approved participant
+            $triggerService->scheduleLiveSessionReminder(
+                (string) $session['_id'],
+                (string) $coachId,
+                $session['title'] ?? 'Live Session',
+                $scheduledAtStr,
+                [(string) $req['client_id']]
+            );
+        } else {
+            // Notify client of rejection
+            $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+            $coachName = $coach['name'] ?? 'Your coach';
+            $triggerService->notifyClientJoinRejected(
+                $coachName,
+                (string) $req['client_id'],
+                (string) $session['_id'],
+                $session['title'] ?? 'Live Session'
             );
         }
 
@@ -458,6 +495,11 @@ class LiveTrainingController
             Response::error('Request already submitted', 409);
         }
 
+        $scheduledAtStr = isset($session['scheduled_at'])
+            ? date('Y-m-d H:i:s', intdiv((int) ((string) $session['scheduled_at']), 1000))
+            : '';
+        $triggerService = new NotificationTriggerService();
+
         if (!empty($session['requires_approval'])) {
             // Create a pending request
             Database::collection('live_training_requests')->insertOne([
@@ -467,6 +509,16 @@ class LiveTrainingController
                 'created_at' => new UTCDateTime(),
                 'updated_at' => new UTCDateTime(),
             ]);
+
+            // Notify coach of join request
+            $triggerService->notifyCoachJoinRequest(
+                (string) $clientId,
+                $client['name'] ?? 'A client',
+                (string) $sessionId,
+                $session['title'] ?? 'Live Session',
+                $scheduledAtStr
+            );
+
             Response::success(null, 'Join request submitted', 201);
         } else {
             // Direct join
@@ -481,6 +533,16 @@ class LiveTrainingController
                 'created_at' => new UTCDateTime(),
                 'updated_at' => new UTCDateTime(),
             ]);
+
+            // Notify coach of direct join
+            $triggerService->notifyCoachDirectJoin(
+                (string) $clientId,
+                $client['name'] ?? 'A client',
+                (string) $sessionId,
+                $session['title'] ?? 'Live Session',
+                $scheduledAtStr
+            );
+
             Response::success(null, 'Joined session');
         }
     }

@@ -179,32 +179,14 @@ class SettingsController
         $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
-        $customerId = $coach['stripe_customer_id'] ?? null;
-        if (!$customerId) {
-            Response::success(['payment_methods' => []]);
-            return;
-        }
-
-        try {
-            $stripe = new StripeService();
-        } catch (\RuntimeException $e) {
-            Response::error('Payment processing is not configured. Please contact support.', 503);
-        }
-
-        try {
-            $result = $stripe->getPaymentMethods($customerId);
-        } catch (\RuntimeException $e) {
-            Response::error('Failed to fetch payment methods: ' . $e->getMessage(), 500);
-        }
-
         $methods = array_map(fn($pm) => [
-            'id'        => $pm['id'],
-            'brand'     => $pm['card']['brand'] ?? 'unknown',
-            'last4'     => $pm['card']['last4'] ?? '',
-            'exp_month' => $pm['card']['exp_month'] ?? null,
-            'exp_year'  => $pm['card']['exp_year'] ?? null,
+            'id'         => $pm['id'],
+            'brand'      => $pm['brand'] ?? 'unknown',
+            'last4'      => $pm['last4'] ?? '',
+            'exp_month'  => $pm['exp_month'] ?? null,
+            'exp_year'   => $pm['exp_year'] ?? null,
             'is_default' => ($coach['stripe_default_payment_method'] ?? '') === $pm['id'],
-        ], $result['data'] ?? []);
+        ], (array) ($coach['payment_methods'] ?? []));
 
         Response::success(['payment_methods' => $methods]);
     }
@@ -233,14 +215,31 @@ class SettingsController
         $paymentMethodId = $body['payment_method_id'];
 
         try {
-            $stripe->attachPaymentMethod($customerId, $paymentMethodId);
+            $pm = $stripe->attachPaymentMethod($customerId, $paymentMethodId);
+            $card = $pm['card'] ?? [];
+            $methodDoc = [
+                'id'        => $pm['id'],
+                'brand'     => $card['brand'] ?? 'unknown',
+                'last4'     => $card['last4'] ?? '',
+                'exp_month' => $card['exp_month'] ?? null,
+                'exp_year'  => $card['exp_year'] ?? null,
+            ];
+
+            $set = ['updated_at' => new UTCDateTime()];
+            $push = ['payment_methods' => $methodDoc];
+
             if (!empty($body['is_default'])) {
                 $stripe->setDefaultPaymentMethod($customerId, $paymentMethodId);
-                Database::collection('coaches')->updateOne(
-                    ['_id' => $coachId],
-                    ['$set' => ['stripe_default_payment_method' => $paymentMethodId]]
-                );
+                $set['stripe_default_payment_method'] = $paymentMethodId;
             }
+
+            Database::collection('coaches')->updateOne(
+                ['_id' => $coachId],
+                array_merge(
+                    ['$push' => $push],
+                    $set ? ['$set' => $set] : []
+                )
+            );
         } catch (\RuntimeException $e) {
             Response::error('Failed to attach payment method: ' . $e->getMessage(), 500);
         }
@@ -390,5 +389,92 @@ class SettingsController
         );
 
         Response::success(null, 'Team member removed');
+    }
+
+    // ─── Integrations ───────────────────────────────────────────────────────────
+
+    public function getIntegrations(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $coach   = Database::collection('coaches')->findOne(
+            ['_id' => $coachId],
+            ['projection' => ['integration_settings' => 1, 'subscription_tier' => 1]]
+        );
+
+        $settings = $coach['integration_settings'] ?? [];
+        Response::success([
+            'webhook_url' => $settings['webhook_url'] ?? '',
+            'api_key'     => $settings['api_key'] ?? '',
+            'tier'        => $coach['subscription_tier'] ?? 'none',
+        ]);
+    }
+
+    public function updateIntegrations(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $body    = Request::body();
+
+        $update = [];
+        if (isset($body['webhook_url'])) {
+            $url = trim((string) $body['webhook_url']);
+            if (!empty($url) && !filter_var($url, FILTER_VALIDATE_URL)) {
+                Response::error('Invalid webhook URL', 422);
+            }
+            $update['webhook_url'] = $url;
+        }
+        if (!empty($body['generate_api_key'])) {
+            $update['api_key'] = bin2hex(random_bytes(32));
+        }
+
+        if (empty($update)) {
+            Response::error('No valid fields provided', 422);
+        }
+
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'integration_settings' => array_merge(
+                    (array) (Database::collection('coaches')->findOne(['_id' => $coachId], ['projection' => ['integration_settings' => 1]])['integration_settings'] ?? []),
+                    $update
+                ),
+                'updated_at' => new UTCDateTime(),
+            ]]
+        );
+
+        Response::success($update, 'Integration settings updated');
+    }
+
+    // ─── Support Contact ────────────────────────────────────────────────────────
+
+    public function createSupportTicket(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $body    = Request::body();
+        $errors  = Request::validate($body, ['subject' => 'required|min:2', 'message' => 'required|min:5']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        $coach = Database::collection('coaches')->findOne(
+            ['_id' => $coachId],
+            ['projection' => ['name' => 1, 'email' => 1, 'subscription_tier' => 1]]
+        );
+
+        $isPriority = in_array($coach['subscription_tier'] ?? '', ['business'], true);
+
+        $ticket = [
+            'coach_id'     => $coachId,
+            'coach_name'   => $coach['name'] ?? 'Unknown',
+            'coach_email'  => $coach['email'] ?? '',
+            'subject'      => trim($body['subject']),
+            'message'      => trim($body['message']),
+            'priority'     => $isPriority ? 'high' : 'normal',
+            'tier'         => $coach['subscription_tier'] ?? 'none',
+            'status'       => 'open',
+            'created_at'   => new UTCDateTime(),
+            'updated_at'   => new UTCDateTime(),
+        ];
+
+        Database::collection('support_tickets')->insertOne($ticket);
+
+        Response::success(null, $isPriority ? 'Priority support ticket created' : 'Support ticket created');
     }
 }

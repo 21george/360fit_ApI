@@ -89,12 +89,7 @@ class AuthController
 
         $setupToken = null;
         if ($subscriptionStatus === 'pending') {
-            $setupPayload = [
-                'sub'  => (string) $coach['_id'],
-                'role' => 'coach',
-                'type' => 'setup',
-            ];
-            $setupToken = JwtService::generateAccessToken($setupPayload, 3600);
+            $setupToken = JwtService::generateSetupToken((string) $coach['_id']);
         }
 
         Response::success([
@@ -141,7 +136,7 @@ class AuthController
             'password_hash'     => password_hash($body['password'], PASSWORD_BCRYPT, ['cost' => 12]),
             'language'          => $body['language'] ?? 'en',
             'client_count'      => 0,
-            'subscription_tier'   => 'free',
+            'subscription_tier'   => 'none',
             'subscription_status' => 'pending',
             'created_at'        => new \MongoDB\BSON\UTCDateTime(),
             'updated_at'        => new \MongoDB\BSON\UTCDateTime(),
