@@ -414,4 +414,104 @@ class AnalyticsController
             'top_clients'           => $topClients,
         ]);
     }
+
+    // GET /analytics/sessions — 1-on-1 coaching session analytics
+    public function sessionAnalytics(array $params): void
+    {
+        $user    = $params['_auth'];
+        $coachId = new ObjectId($user['sub']);
+
+        if ($user['role'] !== 'coach') Response::error('Forbidden', 403);
+
+        $col        = Database::collection('coaching_sessions');
+        $clientsCol = Database::collection('clients');
+        $baseFilter = ['coach_id' => $coachId];
+
+        // ── Counts by status ──────────────────────────────────────────────
+        $statusCounts = ['upcoming' => 0, 'live' => 0, 'ended' => 0, 'cancelled' => 0];
+        foreach ($col->aggregate([
+            ['$match' => $baseFilter],
+            ['$group' => ['_id' => '$status', 'count' => ['$sum' => 1]]],
+        ]) as $doc) {
+            if (isset($statusCounts[$doc['_id']])) {
+                $statusCounts[$doc['_id']] = (int) $doc['count'];
+            }
+        }
+        $total = array_sum($statusCounts);
+
+        // ── Sessions created this month ───────────────────────────────────
+        $monthStart = new UTCDateTime((new \DateTime('first day of this month midnight'))->getTimestamp() * 1000);
+        $thisMonth  = $col->countDocuments(array_merge($baseFilter, [
+            'created_at' => ['$gte' => $monthStart],
+        ]));
+
+        // ── Average actual duration for ended sessions (minutes) ──────────
+        $avgDuration = 0;
+        foreach ($col->aggregate([
+            ['$match' => array_merge($baseFilter, [
+                'status'     => 'ended',
+                'started_at' => ['$ne' => null],
+                'ended_at'   => ['$ne' => null],
+            ])],
+            ['$project' => ['duration_ms' => ['$subtract' => ['$ended_at', '$started_at']]]],
+            ['$group'   => ['_id' => null, 'avg_ms' => ['$avg' => '$duration_ms']]],
+        ]) as $doc) {
+            $avgDuration = round($doc['avg_ms'] / 60000, 1);
+        }
+
+        // ── Top 5 clients by session count (last 30 days) ─────────────────
+        $thirtyDaysAgo = new UTCDateTime((new \DateTime('-30 days'))->getTimestamp() * 1000);
+        $topClients    = [];
+        foreach ($col->aggregate([
+            ['$match' => array_merge($baseFilter, ['scheduled_at' => ['$gte' => $thirtyDaysAgo]])],
+            ['$group' => ['_id' => '$client_id', 'sessions' => ['$sum' => 1]]],
+            ['$sort'  => ['sessions' => -1]],
+            ['$limit' => 5],
+        ]) as $doc) {
+            $client       = $clientsCol->findOne(['_id' => $doc['_id']], ['projection' => ['name' => 1]]);
+            $topClients[] = [
+                'id'       => (string) $doc['_id'],
+                'name'     => $client['name'] ?? 'Unknown',
+                'sessions' => (int) $doc['sessions'],
+            ];
+        }
+
+        // ── 5 most recent sessions ────────────────────────────────────────
+        $recent = [];
+        foreach ($col->find($baseFilter, ['sort' => ['scheduled_at' => -1], 'limit' => 5]) as $s) {
+            $client   = $clientsCol->findOne(['_id' => $s['client_id']], ['projection' => ['name' => 1]]);
+            $recent[] = [
+                'id'           => (string) $s['_id'],
+                'title'        => $s['title'] ?? '',
+                'client_name'  => $client['name'] ?? 'Unknown',
+                'status'       => $s['status'] ?? 'upcoming',
+                'scheduled_at' => isset($s['scheduled_at']) ? $s['scheduled_at']->toDateTime()->format('c') : null,
+                'duration_min' => $s['duration_min'] ?? null,
+            ];
+        }
+
+        // ── Monthly trend (last 6 months) ─────────────────────────────────
+        $sixMonthsAgo = new UTCDateTime((new \DateTime('-6 months'))->getTimestamp() * 1000);
+        $trend        = [];
+        foreach ($col->aggregate([
+            ['$match'  => array_merge($baseFilter, ['scheduled_at' => ['$gte' => $sixMonthsAgo]])],
+            ['$group'  => [
+                '_id'   => ['$dateToString' => ['format' => '%Y-%m', 'date' => '$scheduled_at']],
+                'count' => ['$sum' => 1],
+            ]],
+            ['$sort'   => ['_id' => 1]],
+        ]) as $doc) {
+            $trend[] = ['month' => $doc['_id'], 'count' => (int) $doc['count']];
+        }
+
+        Response::success([
+            'total'            => $total,
+            'by_status'        => $statusCounts,
+            'this_month'       => $thisMonth,
+            'avg_duration_min' => $avgDuration,
+            'top_clients'      => $topClients,
+            'recent'           => $recent,
+            'monthly_trend'    => $trend,
+        ]);
+    }
 }

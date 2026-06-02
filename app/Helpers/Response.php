@@ -6,8 +6,18 @@ namespace App\Helpers;
 
 class Response
 {
+    private static bool $testMode = false;
+
+    public static function enableTestMode(bool $enabled = true): void
+    {
+        self::$testMode = $enabled;
+    }
+
     public static function json(mixed $data, int $code = 200): never
     {
+        if (self::$testMode) {
+            throw new \App\Exceptions\ResponseHaltException($data, $code);
+        }
         http_response_code($code);
         echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         exit;

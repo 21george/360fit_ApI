@@ -51,6 +51,11 @@ class Database
         return null;
     }
 
+    public static function resetInstance(): void
+    {
+        self::$instance = null;
+    }
+
     public static function getInstance(): Database
     {
         if (self::$instance === null) {

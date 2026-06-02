@@ -1,10 +1,27 @@
-<phpunit>
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.5/phpunit.xsd"
+         bootstrap="tests/bootstrap.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache"
+         testdox="true">
     <testsuites>
-        <testsuite name="Backend Test Suite">
-            <directory>./tests</directory>
+        <testsuite name="Unit">
+            <directory>tests/Services</directory>
+            <directory>tests/Helpers</directory>
+        </testsuite>
+        <testsuite name="Integration">
+            <directory>tests/Controllers</directory>
+            <directory>tests/Middleware</directory>
         </testsuite>
     </testsuites>
     <php>
         <ini name="error_reporting" value="-1"/>
+        <env name="APP_ENV" value="testing"/>
     </php>
+    <source>
+        <include>
+            <directory>app</directory>
+        </include>
+    </source>
 </phpunit>

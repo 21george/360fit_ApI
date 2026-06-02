@@ -600,6 +600,162 @@ class NotificationTriggerService
         $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
     }
 
+    // ─── Workout Log & Plan Notifications ────────────────────────────────────
+
+    /**
+     * Notify a coach when a client updates an existing workout log.
+     */
+    public function notifyWorkoutLogUpdated(
+        string $coachId,
+        string $clientId,
+        string $clientName,
+        string $workoutPlanName,
+        string $day,
+        ?string $workoutLogId = null
+    ): void {
+        $notification = [
+            'user_id'    => new ObjectId($coachId),
+            'user_type'  => 'coach',
+            'type'       => 'workout_log_updated',
+            'title'      => 'Workout Updated',
+            'body'       => "{$clientName} updated their log for {$day} in \"{$workoutPlanName}\"",
+            'data'       => [
+                'clientId'       => $clientId,
+                'clientName'     => $clientName,
+                'workoutLogId'   => $workoutLogId,
+                'workoutPlanName'=> $workoutPlanName,
+                'day'            => $day,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToCoach(new ObjectId($coachId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify a coach when a client completes all days of a workout plan.
+     */
+    public function notifyPlanCompleted(
+        string $coachId,
+        string $clientId,
+        string $clientName,
+        string $workoutPlanName,
+        string $planId
+    ): void {
+        $notification = [
+            'user_id'    => new ObjectId($coachId),
+            'user_type'  => 'coach',
+            'type'       => 'plan_completed',
+            'title'      => 'Plan Completed!',
+            'body'       => "{$clientName} finished all workouts in \"{$workoutPlanName}\"",
+            'data'       => [
+                'clientId'       => $clientId,
+                'clientName'     => $clientName,
+                'planId'         => $planId,
+                'workoutPlanName'=> $workoutPlanName,
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToCoach(new ObjectId($coachId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    // ─── 1-on-1 Coaching Session Notifications ───────────────────────────────
+
+    /**
+     * Notify a client when a new 1:1 coaching session is scheduled for them.
+     */
+    public function notifyNewCoachingSession(
+        string $coachName,
+        string $clientId,
+        string $sessionId,
+        string $title,
+        string $scheduledAt
+    ): void {
+        $formattedTime = date('M j, g:i A', strtotime($scheduledAt));
+        $notification  = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'new_coaching_session',
+            'title'      => '📅 1-on-1 Session Scheduled',
+            'body'       => "{$coachName} scheduled \"{$title}\" for {$formattedTime}",
+            'data'       => [
+                'sessionId'    => $sessionId,
+                'sessionTitle' => $title,
+                'coachName'    => $coachName,
+                'scheduledAt'  => $scheduledAt,
+                'screen'       => 'coaching-session',
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify a client when their 1:1 coaching session goes live.
+     */
+    public function notifyCoachingSessionStarted(
+        string $coachName,
+        string $clientId,
+        string $sessionId,
+        string $title
+    ): void {
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'coaching_session_live',
+            'title'      => '🔴 Session is Live!',
+            'body'       => "{$coachName} has started \"{$title}\" — join now",
+            'data'       => [
+                'sessionId'    => $sessionId,
+                'sessionTitle' => $title,
+                'coachName'    => $coachName,
+                'screen'       => 'coaching-session',
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
+     * Notify coach when a new workout analysis is ready for review.
+     */
+    public function notifyCoachAnalysisReady(string $coachId, string $clientId, string $clientName): void
+    {
+        $notification = [
+            'user_id'    => new ObjectId($coachId),
+            'user_type'  => 'coach',
+            'type'       => 'analysis_ready',
+            'title'      => 'Workout Analysis Ready',
+            'body'       => "New workout analysis ready for {$clientName}",
+            'data'       => [
+                'clientId'   => $clientId,
+                'clientName' => $clientName,
+                'screen'     => 'plan-analysis',
+            ],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToCoach(new ObjectId($coachId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
     /**
      * Helper: Get coach by client ID
      */

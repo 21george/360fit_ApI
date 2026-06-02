@@ -124,14 +124,32 @@ class WorkoutLogController
 
         // Get client info for notification
         $client = Database::collection('clients')->findOne(['_id' => $clientId]);
+        $triggerService = new NotificationTriggerService();
         if ($client && $plan) {
-            $triggerService = new NotificationTriggerService();
             $triggerService->notifyWorkoutCompleted(
                 (string) $clientId,
                 $client['name'] ?? 'A client',
                 $plan['title'] ?? 'a workout',
                 (string) $logId->getInsertedId()
             );
+        }
+
+        // Detect if the entire plan is now completed
+        $totalDays = count($plan['days'] ?? []);
+        if ($totalDays > 0 && $client && $plan) {
+            $completedCount = Database::collection('workout_logs')->countDocuments([
+                'client_id'       => $clientId,
+                'workout_plan_id' => $planId,
+            ]);
+            if ($completedCount >= $totalDays) {
+                $triggerService->notifyPlanCompleted(
+                    (string) $client['coach_id'],
+                    (string) $clientId,
+                    $client['name'] ?? 'A client',
+                    $plan['title'] ?? 'a workout',
+                    (string) $planId
+                );
+            }
         }
 
         Response::success(['id' => (string) $logId->getInsertedId()], 'Workout logged', 201);
@@ -158,6 +176,21 @@ class WorkoutLogController
 
         if (!empty($set)) {
             Database::collection('workout_logs')->updateOne(['_id' => $logId], ['$set' => $set]);
+        }
+
+        // Notify coach that client updated their log
+        $plan   = Database::collection('workout_plans')->findOne(['_id' => $log['workout_plan_id']]);
+        $client = Database::collection('clients')->findOne(['_id' => $clientId]);
+        if ($client && $plan) {
+            $triggerService = new NotificationTriggerService();
+            $triggerService->notifyWorkoutLogUpdated(
+                (string) $client['coach_id'],
+                (string) $clientId,
+                $client['name'] ?? 'A client',
+                $plan['title'] ?? 'a workout',
+                $log['day'] ?? '',
+                (string) $logId
+            );
         }
 
         Response::success(null, 'Log updated');
@@ -460,6 +493,139 @@ class WorkoutLogController
                 'completed_count' => count($completed),
                 'in_progress_count' => count($inProgress),
             ],
+        ]);
+    }
+
+    // GET /coach/clients/:id/live-progress (coach view — lightweight real-time state)
+    public function liveProgress(array $params): void
+    {
+        $coachId  = new ObjectId($params['_auth']['sub']);
+        $clientId = new ObjectId($params['id']);
+
+        // Verify the client belongs to this coach (IDOR fix)
+        $client = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
+        if (!$client) Response::error('Client not found', 404);
+
+        // Find current active plan (current week, fallback to most recent)
+        $monday   = strtotime('monday this week');
+        $sunday   = strtotime('sunday this week 23:59:59');
+        $clientFilter = $this->clientPlanFilter($clientId);
+
+        $plan = Database::collection('workout_plans')->findOne(array_merge(
+            $clientFilter,
+            [
+                'status'     => 'active',
+                'week_start' => [
+                    '$gte' => new \MongoDB\BSON\UTCDateTime($monday * 1000),
+                    '$lte' => new \MongoDB\BSON\UTCDateTime($sunday * 1000),
+                ],
+            ]
+        ));
+
+        if (!$plan) {
+            $plan = Database::collection('workout_plans')->findOne(
+                array_merge($clientFilter, ['status' => 'active']),
+                ['sort' => ['week_start' => -1]]
+            );
+        }
+
+        if (!$plan) {
+            Response::success([
+                'client'       => [
+                    'id'    => (string) $clientId,
+                    'name'  => $client['name'] ?? 'Client',
+                    'photo' => $client['profile_photo_url'] ?? null,
+                ],
+                'active_plan'  => null,
+                'latest_log'   => null,
+                'last_activity_at' => null,
+            ]);
+            return;
+        }
+
+        // Gather logs for this plan
+        $planId = $plan['_id'];
+        $logs   = Database::collection('workout_logs')->find([
+            'client_id'       => $clientId,
+            'workout_plan_id' => $planId,
+        ], ['sort' => ['completed_at' => -1]])->toArray();
+
+        $logMap = [];
+        $latestLog = null;
+        foreach ($logs as $log) {
+            $dayKey = strtolower($log['day'] ?? '');
+            if (!isset($logMap[$dayKey])) {
+                $logMap[$dayKey] = $log;
+            }
+            if ($latestLog === null) {
+                $latestLog = $log;
+            }
+        }
+
+        $totalDays     = count($plan['days'] ?? []);
+        $completedDays = 0;
+        $daysResult    = [];
+        foreach ($plan['days'] ?? [] as $day) {
+            $dayKey      = strtolower($day['day'] ?? '');
+            $isCompleted = isset($logMap[$dayKey]);
+            if ($isCompleted) $completedDays++;
+
+            $completedAt = null;
+            if ($isCompleted && isset($logMap[$dayKey]['completed_at'])) {
+                $ts = $logMap[$dayKey]['completed_at'];
+                if ($ts instanceof \MongoDB\BSON\UTCDateTime) {
+                    $completedAt = $ts->toDateTime()->format(\DATE_ATOM);
+                } elseif (is_string($ts) && $ts !== '') {
+                    $completedAt = date(\DATE_ATOM, strtotime($ts));
+                }
+            }
+
+            $daysResult[] = [
+                'day'           => $day['day'] ?? '',
+                'is_completed'  => $isCompleted,
+                'completed_at'  => $completedAt,
+            ];
+        }
+
+        // Format latest log
+        $latestLogFormatted = null;
+        if ($latestLog) {
+            $completedAt = null;
+            if (isset($latestLog['completed_at'])) {
+                $ts = $latestLog['completed_at'];
+                if ($ts instanceof \MongoDB\BSON\UTCDateTime) {
+                    $completedAt = $ts->toDateTime()->format(\DATE_ATOM);
+                } elseif (is_string($ts) && $ts !== '') {
+                    $completedAt = date(\DATE_ATOM, strtotime($ts));
+                }
+            }
+            $latestLogFormatted = [
+                'id'            => (string) $latestLog['_id'],
+                'day'           => $latestLog['day'] ?? '',
+                'exercises'     => $latestLog['exercises'] ?? [],
+                'notes'         => $latestLog['notes'] ?? null,
+                'completed_at'  => $completedAt,
+            ];
+        }
+
+        $lastActivityAt = $latestLogFormatted['completed_at'] ?? null;
+
+        Response::success([
+            'client' => [
+                'id'    => (string) $clientId,
+                'name'  => $client['name'] ?? 'Client',
+                'photo' => $client['profile_photo_url'] ?? null,
+            ],
+            'active_plan' => [
+                'id'             => (string) $planId,
+                'title'          => $plan['title'] ?? '',
+                'progress_pct'   => $totalDays > 0 ? round(($completedDays / $totalDays) * 100, 1) : 0,
+                'total_days'     => $totalDays,
+                'completed_days' => $completedDays,
+                'days'           => $daysResult,
+            ],
+            'latest_log'       => $latestLogFormatted,
+            'last_activity_at' => $lastActivityAt,
         ]);
     }
 }

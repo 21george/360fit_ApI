@@ -240,6 +240,35 @@ class CoachController {
         Response::success(null, 'Password changed successfully');
     }
 
+    public function destroy(array $params): void
+    {
+        $coachId = $params['_auth']['sub'];
+
+        $coach = Database::collection('coaches')->findOne(
+            ['_id' => new ObjectId($coachId)],
+            ['projection' => ['profile_photo_key' => 1]]
+        );
+
+        if (!$coach) {
+            Response::error('Coach not found', 404);
+        }
+
+        // Delete profile photo from storage if present
+        if (!empty($coach['profile_photo_key'])) {
+            $key = (string) $coach['profile_photo_key'];
+            if (str_starts_with($key, 'local:')) {
+                $path = BASE_PATH . '/public/' . substr($key, 6);
+                if (is_file($path)) @unlink($path);
+            } elseif (\App\Services\S3Service::isConfigured()) {
+                \App\Services\S3Service::delete($key);
+            }
+        }
+
+        Database::collection('coaches')->deleteOne(['_id' => new ObjectId($coachId)]);
+
+        Response::success(null, 'Account deleted permanently');
+    }
+
     public function index(array $params): void
     {
         $coaches = Database::collection('coaches')->find(

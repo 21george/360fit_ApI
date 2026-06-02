@@ -29,7 +29,7 @@ class ClientController
     {
         $clientId = new ObjectId($params['_auth']['sub']);
         $body = Request::body();
-        $allowed = ['name', 'language', 'profile_photo_url', 'phone', 'address', 'city', 'postal_code', 'nationality', 'occupation'];
+        $allowed = ['name', 'email', 'language', 'profile_photo_url', 'phone', 'address', 'city', 'postal_code', 'nationality', 'occupation', 'date_of_birth', 'current_weight_kg', 'height_cm', 'sickness'];
         $set = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
 
         foreach ($allowed as $field) {
@@ -227,17 +227,34 @@ class ClientController
 
         // Send login code email if client has email
         $emailSent = false;
+        $emailError = null;
         if (!empty($body['email'])) {
-            $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
-            $coachName = $coach['name'] ?? 'Your Coach';
-            $emailSent = EmailService::sendClientLoginCode($body['email'], $body['name'], $coachName, $code);
+            try {
+                $coach     = Database::collection('coaches')->findOne(['_id' => $coachId]);
+                $coachName  = $coach['name']  ?? 'Your Coach';
+                $coachEmail = $coach['email'] ?? '';
+                $emailSent  = EmailService::sendClientLoginCode(
+                    trim((string) $body['email']),
+                    $body['name'],
+                    $coachName,
+                    $code,
+                    $coachEmail
+                );
+                if (!$emailSent) {
+                    $emailError = 'Mail delivery returned false — check server mail config';
+                }
+            } catch (\Throwable $e) {
+                $emailError = $e->getMessage();
+                error_log('Failed to send welcome email to client: ' . $emailError);
+            }
         }
 
         Response::success([
-            'id'         => (string) $result->getInsertedId(),
-            'name'       => $body['name'],
-            'login_code' => $code,  // shown ONCE to coach
-            'email_sent' => $emailSent,
+            'id'          => (string) $result->getInsertedId(),
+            'name'        => $body['name'],
+            'login_code'  => $code,        // shown ONCE to coach
+            'email_sent'  => $emailSent,
+            'email_error' => $emailError,  // null on success
         ], 'Client created', 201);
     }
 
@@ -252,10 +269,15 @@ class ClientController
             Response::error('No clients provided. Expecting {clients: [...]}', 422);
         }
 
-        $col       = Database::collection('clients');
-        $created   = 0;
-        $failed    = 0;
-        $errors    = [];
+        // Fetch coach info once for email personalisation
+        $coach      = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        $coachName  = $coach['name']  ?? 'Your Coach';
+        $coachEmail = $coach['email'] ?? '';
+
+        $col        = Database::collection('clients');
+        $created    = 0;
+        $failed     = 0;
+        $errors     = [];
         $loginCodes = [];
 
         foreach ($rows as $idx => $row) {
@@ -305,21 +327,51 @@ class ClientController
                     'created_at'        => new \MongoDB\BSON\UTCDateTime(),
                     'updated_at'        => new \MongoDB\BSON\UTCDateTime(),
                 ]);
+
                 $created++;
-                $loginCodes[] = ['id' => (string) $result->getInsertedId(), 'name' => $name, 'login_code' => $code];
+                $clientEmail = !empty($row['email']) ? trim((string) $row['email']) : '';
+
+                // Send welcome email with login code if the client has an email address
+                $emailSent = false;
+                if (!empty($clientEmail) && filter_var($clientEmail, FILTER_VALIDATE_EMAIL)) {
+                    try {
+                        $emailSent = EmailService::sendClientLoginCode(
+                            $clientEmail,
+                            $name,
+                            $coachName,
+                            $code,
+                            $coachEmail
+                        );
+                    } catch (\Throwable $mailEx) {
+                        error_log("Import: failed to email {$clientEmail} for client {$name}: " . $mailEx->getMessage());
+                    }
+                }
+
+                $loginCodes[] = [
+                    'id'         => (string) $result->getInsertedId(),
+                    'name'       => $name,
+                    'email'      => $clientEmail ?: null,
+                    'login_code' => $code,
+                    'email_sent' => $emailSent,
+                ];
             } catch (\Throwable $e) {
                 $failed++;
                 $errors[] = ['index' => $idx, 'field' => null, 'message' => $e->getMessage()];
             }
         }
 
+        $emailsSent = count(array_filter($loginCodes, fn($c) => $c['email_sent']));
+        $emailsSkipped = count(array_filter($loginCodes, fn($c) => $c['email'] === null));
+
         Response::success([
-            'created'     => $created,
-            'failed'      => $failed,
-            'total'       => count($rows),
-            'errors'      => $errors,
-            'login_codes' => $loginCodes,
-        ], "Imported {$created} of " . count($rows) . ' clients', $failed > 0 ? 207 : 200);
+            'created'        => $created,
+            'failed'         => $failed,
+            'total'          => count($rows),
+            'errors'         => $errors,
+            'emails_sent'    => $emailsSent,
+            'emails_skipped' => $emailsSkipped,
+            'login_codes'    => $loginCodes,
+        ], "Imported {$created} of " . count($rows) . " clients ({$emailsSent} welcome emails sent)", $failed > 0 ? 207 : 200);
     }
 
     // GET /coach/clients/:id

@@ -14,21 +14,49 @@ use App\Controllers\{
     AnalyticsController,
     GroupChatController,
     LiveTrainingController,
+    CoachingSessionController,
     SubscriptionController,
     SettingsController,
-    NotificationsController
+    NotificationsController,
+    WorkoutAnalysisController
 };
-use App\Middleware\{AuthMiddleware, CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SetupAuthMiddleware};
+use App\Middleware\{AuthMiddleware, CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SetupAuthMiddleware, RequestIdMiddleware, RequestLogMiddleware};
+
+// ─── Global Observability Middleware ───────────────────────────────────────────
+$router->use(RequestIdMiddleware::class);
+$router->use(RequestLogMiddleware::class);
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 $router->get('/health', function () {
+    $health = [
+        'status' => 'ok',
+        'version' => '1.0.0',
+        'timestamp' => date('c'),
+        'checks' => [],
+    ];
+
     try {
+        $start = microtime(true);
         \App\Config\Database::collection('coaches')->findOne([], ['projection' => ['_id' => 1], 'limit' => 1]);
-        \App\Helpers\Response::json(['status' => 'ok', 'version' => '1.0.0']);
+        $health['checks']['database'] = [
+            'status' => 'ok',
+            'latency_ms' => round((microtime(true) - $start) * 1000, 2),
+        ];
     } catch (\Throwable $e) {
-        error_log('Health check failed: ' . $e->getMessage());
-        \App\Helpers\Response::json(['status' => 'degraded', 'error' => 'Database unreachable'], 503);
+        $health['status'] = 'degraded';
+        $health['checks']['database'] = [
+            'status' => 'error',
+            'message' => $e->getMessage(),
+        ];
     }
+
+    $health['checks']['memory'] = [
+        'status' => 'ok',
+        'usage_mb' => round(memory_get_usage(true) / 1024 / 1024, 2),
+    ];
+
+    $code = $health['status'] === 'ok' ? 200 : 503;
+    \App\Helpers\Response::json($health, $code);
 });
 
 // ─── Auth (rate-limited) ──────────────────────────────────────────────────────
@@ -44,6 +72,7 @@ $router->put('/coach/profile',         [CoachController::class, 'update'],      
 $router->post('/coach/profile/photo',  [CoachController::class, 'uploadPhoto'],    [CoachMiddleware::class]);
 $router->delete('/coach/profile/photo',[CoachController::class, 'deletePhoto'],    [CoachMiddleware::class]);
 $router->put('/coach/profile/password',[CoachController::class, 'changePassword'], [CoachMiddleware::class]);
+$router->delete('/coach/profile',       [CoachController::class, 'destroy'],        [CoachMiddleware::class]);
 
 
 // ─── Coach: Registered Coaches ──────────────────────────────────────────────
@@ -61,9 +90,17 @@ $router->post('/coach/clients/:id/regenerate-code', [ClientController::class, 'r
 $router->post('/coach/clients/:id/block',   [ClientController::class, 'block'],   [CoachMiddleware::class]);
 $router->post('/coach/clients/:id/unblock', [ClientController::class, 'unblock'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/analytics',   [ClientController::class, 'analytics'],      [CoachMiddleware::class]);
-$router->get('/analytics/coach',                [AnalyticsController::class, 'coachAnalytics'], [CoachMiddleware::class]);
+$router->get('/analytics/coach',                [AnalyticsController::class, 'coachAnalytics'],   [CoachMiddleware::class]);
+$router->get('/analytics/sessions',            [AnalyticsController::class, 'sessionAnalytics'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/logs',        [WorkoutLogController::class, 'clientLogs'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/workout-progress', [WorkoutLogController::class, 'clientWorkoutProgress'], [CoachMiddleware::class]);
+$router->get('/coach/clients/:id/workout-analyses', [WorkoutAnalysisController::class, 'index'], [CoachMiddleware::class]);
+$router->post('/coach/clients/:id/workout-analyses', [WorkoutAnalysisController::class, 'create'], [CoachMiddleware::class]);
+$router->get('/coach/clients/:id/workout-analyses/recommendations', [WorkoutAnalysisController::class, 'recommendations'], [CoachMiddleware::class]);
+$router->get('/coach/clients/:id/workout-analyses/:analysisId', [WorkoutAnalysisController::class, 'show'], [CoachMiddleware::class]);
+$router->post('/coach/clients/:id/workout-analyses/:analysisId/approve', [WorkoutAnalysisController::class, 'approve'], [CoachMiddleware::class]);
+$router->post('/coach/clients/:id/workout-analyses/:analysisId/reject', [WorkoutAnalysisController::class, 'reject'], [CoachMiddleware::class]);
+$router->post('/coach/clients/:id/workout-analyses/:analysisId/assign', [WorkoutAnalysisController::class, 'assign'], [CoachMiddleware::class]);
 $router->post('/coach/clients/:id/measurements',[MediaController::class, 'storeMeasurement'],[CoachMiddleware::class]);
 $router->get('/coach/media/:clientId',         [MediaController::class, 'clientMedia'],     [CoachMiddleware::class]);
 
@@ -151,6 +188,21 @@ $router->post('/client/live-training/:id/join',        [LiveTrainingController::
 $router->get('/client/live-training/:id/participants', [LiveTrainingController::class, 'clientParticipants'],   [ClientMiddleware::class]);
 $router->get('/client/live-training/:id/chat',         [LiveTrainingController::class, 'clientGetChat'],        [ClientMiddleware::class]);
 $router->post('/client/live-training/:id/chat',        [LiveTrainingController::class, 'clientSendChat'],       [ClientMiddleware::class]);
+
+// ─── Coach: 1-on-1 Coaching Sessions ─────────────────────────────────────────
+$router->get('/coaching-sessions',                     [CoachingSessionController::class, 'index'],        [CoachMiddleware::class]);
+$router->post('/coaching-sessions',                    [CoachingSessionController::class, 'store'],        [CoachMiddleware::class]);
+$router->get('/coaching-sessions/:id',                 [CoachingSessionController::class, 'show'],         [CoachMiddleware::class]);
+$router->put('/coaching-sessions/:id',                 [CoachingSessionController::class, 'update'],       [CoachMiddleware::class]);
+$router->delete('/coaching-sessions/:id',              [CoachingSessionController::class, 'destroy'],      [CoachMiddleware::class]);
+$router->post('/coaching-sessions/:id/status',         [CoachingSessionController::class, 'updateStatus'], [CoachMiddleware::class]);
+$router->post('/coaching-sessions/:id/token',          [CoachingSessionController::class, 'getToken'],     [CoachMiddleware::class]);
+$router->post('/coaching-sessions/:id/notes',          [CoachingSessionController::class, 'saveNotes'],    [CoachMiddleware::class]);
+
+// ─── Client: 1-on-1 Coaching Sessions ────────────────────────────────────────
+$router->get('/client/coaching-sessions',              [CoachingSessionController::class, 'clientIndex'],  [ClientMiddleware::class]);
+$router->get('/client/coaching-sessions/:id',          [CoachingSessionController::class, 'clientShow'],   [ClientMiddleware::class]);
+$router->post('/client/coaching-sessions/:id/token',   [CoachingSessionController::class, 'clientToken'],  [ClientMiddleware::class]);
 
 // ─── Client: Analytics ────────────────────────────────────────────────────────
 $router->get('/client/analytics',                   [AnalyticsController::class, 'clientSelfAnalytics'],    [ClientMiddleware::class]);

@@ -70,6 +70,16 @@ $db->getCollection('live_training_requests')->createIndex(['session_id' => 1, 'c
 // live_training_chat
 $db->getCollection('live_training_chat')->createIndex(['session_id' => 1, 'sent_at' => 1]);
 
+// coaching_sessions (1-on-1)
+$db->getCollection('coaching_sessions')->createIndex(['coach_id' => 1, 'status' => 1]);
+$db->getCollection('coaching_sessions')->createIndex(['coach_id' => 1, 'scheduled_at' => -1]);
+$db->getCollection('coaching_sessions')->createIndex(['coach_id' => 1, 'client_id' => 1]);
+$db->getCollection('coaching_sessions')->createIndex(['coach_id' => 1, 'created_at' => -1]);
+
+// client_workout_analyses
+$db->getCollection('client_workout_analyses')->createIndex(['client_id' => 1, 'generated_at' => -1]);
+$db->getCollection('client_workout_analyses')->createIndex(['coach_id' => 1, 'status' => 1]);
+
 // rate_limits
 $db->getCollection('rate_limits')->createIndex(['expires_at' => 1], ['expireAfterSeconds' => 0]);
 
