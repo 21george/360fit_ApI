@@ -56,7 +56,7 @@ class WorkoutAnalysisController
 
         $items = [];
         foreach ($docs as $doc) {
-            $items[] = $this->format($doc);
+            $items[] = $this->format($doc, true);
         }
 
         Response::paginated($items, $total, $page, $perPage);
@@ -326,7 +326,7 @@ class WorkoutAnalysisController
         return $analysis;
     }
 
-    private function format(object $doc, bool $full = false): array
+    private function format(array|object $doc, bool $full = false): array
     {
         $data = [
             'id'                         => (string) $doc['_id'],

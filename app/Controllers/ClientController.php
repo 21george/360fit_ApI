@@ -29,7 +29,7 @@ class ClientController
     {
         $clientId = new ObjectId($params['_auth']['sub']);
         $body = Request::body();
-        $allowed = ['name', 'email', 'language', 'profile_photo_url', 'phone', 'address', 'city', 'postal_code', 'nationality', 'occupation', 'date_of_birth', 'current_weight_kg', 'height_cm', 'sickness'];
+        $allowed = ['name', 'email', 'language', 'profile_photo_url', 'phone', 'address', 'city', 'postal_code', 'nationality', 'occupation', 'date_of_birth', 'current_weight_kg', 'height_cm', 'chest_cm', 'waist_cm', 'body_fat_pct', 'bmi', 'lean_mass_kg', 'sickness'];
         $set = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
 
         foreach ($allowed as $field) {
@@ -212,6 +212,11 @@ class ClientController
             'date_of_birth'     => $body['date_of_birth'] ?? null,
             'current_weight_kg' => isset($body['current_weight_kg']) ? (float) $body['current_weight_kg'] : null,
             'height_cm'         => isset($body['height_cm']) ? (int) $body['height_cm'] : null,
+            'chest_cm'          => isset($body['chest_cm']) ? (float) $body['chest_cm'] : null,
+            'waist_cm'          => isset($body['waist_cm']) ? (float) $body['waist_cm'] : null,
+            'body_fat_pct'      => isset($body['body_fat_pct']) ? (float) $body['body_fat_pct'] : null,
+            'bmi'               => isset($body['bmi']) ? (float) $body['bmi'] : null,
+            'lean_mass_kg'      => isset($body['lean_mass_kg']) ? (float) $body['lean_mass_kg'] : null,
             'sickness'          => $body['sickness'] ?? null,
             'login_code_hash'   => $codeHash,
             'code_lookup'       => $codeLookup,
@@ -315,6 +320,11 @@ class ClientController
                     'date_of_birth'     => $dob ?? ($row['date_of_birth'] ?? null),
                     'current_weight_kg' => isset($row['weight']) ? (float) $row['weight'] : (isset($row['current_weight_kg']) ? (float) $row['current_weight_kg'] : null),
                     'height_cm'         => isset($row['height']) ? (int) $row['height'] : (isset($row['height_cm']) ? (int) $row['height_cm'] : null),
+                    'chest_cm'          => isset($row['chest_cm']) ? (float) $row['chest_cm'] : null,
+                    'waist_cm'          => isset($row['waist_cm']) ? (float) $row['waist_cm'] : null,
+                    'body_fat_pct'      => isset($row['body_fat_pct']) ? (float) $row['body_fat_pct'] : null,
+                    'bmi'               => isset($row['bmi']) ? (float) $row['bmi'] : null,
+                    'lean_mass_kg'      => isset($row['lean_mass_kg']) ? (float) $row['lean_mass_kg'] : null,
                     'sickness'          => $row['sickness'] ?? null,
                     'login_code_hash'   => $codeHash,
                     'code_lookup'       => $codeLookup,
@@ -386,7 +396,7 @@ class ClientController
     {
         $client  = $this->findClient($params, includeBlocked: true);
         $body    = Request::body();
-        $allowed = ['name', 'email', 'phone', 'language', 'notes', 'address', 'city', 'postal_code', 'nationality', 'occupation', 'date_of_birth', 'current_weight_kg', 'height_cm', 'sickness'];
+        $allowed = ['name', 'email', 'phone', 'language', 'notes', 'address', 'city', 'postal_code', 'nationality', 'occupation', 'date_of_birth', 'current_weight_kg', 'height_cm', 'chest_cm', 'waist_cm', 'body_fat_pct', 'bmi', 'lean_mass_kg', 'sickness'];
         $set     = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
 
         foreach ($allowed as $field) {
@@ -593,6 +603,11 @@ class ClientController
             'date_of_birth'     => $doc['date_of_birth'] ?? null,
             'current_weight_kg' => $doc['current_weight_kg'] ?? null,
             'height_cm'         => $doc['height_cm'] ?? null,
+            'chest_cm'          => $doc['chest_cm'] ?? null,
+            'waist_cm'          => $doc['waist_cm'] ?? null,
+            'body_fat_pct'      => $doc['body_fat_pct'] ?? null,
+            'bmi'               => $doc['bmi'] ?? null,
+            'lean_mass_kg'      => $doc['lean_mass_kg'] ?? null,
             'sickness'          => $doc['sickness'] ?? null,
             'profile_photo_url' => $doc['profile_photo_url'] ?? null,
             'notes'             => $doc['notes'] ?? null,

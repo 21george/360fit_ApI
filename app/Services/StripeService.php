@@ -33,7 +33,7 @@ class StripeService
             ]);
             return $customer->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -60,7 +60,7 @@ class StripeService
             ]);
             return $session->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -87,7 +87,7 @@ class StripeService
             ]);
             return $session->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -117,7 +117,7 @@ class StripeService
             ]);
             return $session->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -144,7 +144,7 @@ class StripeService
             ]);
             return $session->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -154,7 +154,7 @@ class StripeService
             $sub = $this->stripe->subscriptions->retrieve($subscriptionId);
             return $sub->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -166,7 +166,7 @@ class StripeService
             ]);
             return $sub->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -195,7 +195,7 @@ class StripeService
             ]);
             return $invoices->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -221,7 +221,7 @@ class StripeService
             ]);
             return $updated->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -259,7 +259,7 @@ class StripeService
             $invoice = $this->stripe->invoices->retrieve($invoiceId);
             return $invoice->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -273,7 +273,7 @@ class StripeService
             ]);
             return $intent->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -283,7 +283,7 @@ class StripeService
             $methods = $this->stripe->customers->allPaymentMethods($customerId, ['type' => 'card']);
             return $methods->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -293,7 +293,7 @@ class StripeService
             $pm = $this->stripe->paymentMethods->attach($paymentMethodId, ['customer' => $customerId]);
             return $pm->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -305,7 +305,7 @@ class StripeService
             ]);
             return $customer->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -315,7 +315,7 @@ class StripeService
             $pm = $this->stripe->paymentMethods->detach($paymentMethodId);
             return $pm->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 
@@ -325,7 +325,7 @@ class StripeService
             $invoice = $this->stripe->invoices->upcoming(['customer' => $customerId]);
             return $invoice->toArray();
         } catch (ApiErrorException $e) {
-            throw new \RuntimeException($e->getMessage(), $e->getHttpStatusCode());
+            throw new \RuntimeException($e->getMessage(), $e->getHttpStatus());
         }
     }
 }

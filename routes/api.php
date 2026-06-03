@@ -94,6 +94,7 @@ $router->get('/analytics/coach',                [AnalyticsController::class, 'co
 $router->get('/analytics/sessions',            [AnalyticsController::class, 'sessionAnalytics'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/logs',        [WorkoutLogController::class, 'clientLogs'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/workout-progress', [WorkoutLogController::class, 'clientWorkoutProgress'], [CoachMiddleware::class]);
+$router->get('/coach/clients/:id/live-progress', [WorkoutLogController::class, 'liveProgress'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/workout-analyses', [WorkoutAnalysisController::class, 'index'], [CoachMiddleware::class]);
 $router->post('/coach/clients/:id/workout-analyses', [WorkoutAnalysisController::class, 'create'], [CoachMiddleware::class]);
 $router->get('/coach/clients/:id/workout-analyses/recommendations', [WorkoutAnalysisController::class, 'recommendations'], [CoachMiddleware::class]);

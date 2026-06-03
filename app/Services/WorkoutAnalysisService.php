@@ -258,7 +258,7 @@ class WorkoutAnalysisService
         return (int) max(0, min(100, round($score)));
     }
 
-    private function generateRecommendations(array $metrics, array $client): array
+    private function generateRecommendations(array $metrics, array|object $client): array
     {
         $recommendations = [];
         $completion = $metrics['completion_rate'];

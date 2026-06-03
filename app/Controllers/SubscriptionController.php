@@ -139,44 +139,44 @@ class SubscriptionController
         // For paid tiers: create Stripe customer and checkout session
         try {
             $stripe = new StripeService();
-        } catch (\RuntimeException $e) {
-            Response::error('Payment processing is not configured. Please contact support.', 503);
-        }
-        $priceId = $stripe->getPriceIdForTier($tier, $period);
+            $priceId = $stripe->getPriceIdForTier($tier, $period);
 
-        if (empty($priceId)) {
-            Response::error('Stripe price not configured for this tier and period', 500);
-        }
+            if (empty($priceId)) {
+                Response::error('Stripe price not configured for this tier and period', 503);
+            }
 
-        // Create Stripe customer
-        $customerId = $coach['stripe_customer_id'] ?? null;
-        if (!$customerId) {
-            $customer = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
-            $customerId = $customer['id'];
+            // Create Stripe customer
+            $customerId = $coach['stripe_customer_id'] ?? null;
+            if (!$customerId) {
+                $customer = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
+                $customerId = $customer['id'];
+                Database::collection('coaches')->updateOne(
+                    ['_id' => $coachId],
+                    ['$set' => ['stripe_customer_id' => $customerId]]
+                );
+            }
+
+            // Store selected tier and period temporarily for webhook to use
             Database::collection('coaches')->updateOne(
                 ['_id' => $coachId],
-                ['$set' => ['stripe_customer_id' => $customerId]]
+                ['$set' => [
+                    'pending_subscription_tier'   => $tier,
+                    'pending_subscription_period' => $period,
+                    'updated_at'                  => new \MongoDB\BSON\UTCDateTime(),
+                ]]
             );
+
+            // Create checkout session with signup-specific URLs
+            $session = $stripe->createSignupCheckoutSession($customerId, $priceId, (string) $coachId);
+
+            Response::success([
+                'checkout_url' => $session['url'],
+                'tier'         => $tier,
+                'period'       => $period,
+            ], 'Ready for checkout');
+        } catch (\RuntimeException $e) {
+            Response::error('Payment processing error: ' . $e->getMessage(), 503);
         }
-
-        // Store selected tier and period temporarily for webhook to use
-        Database::collection('coaches')->updateOne(
-            ['_id' => $coachId],
-            ['$set' => [
-                'pending_subscription_tier'   => $tier,
-                'pending_subscription_period' => $period,
-                'updated_at'                  => new \MongoDB\BSON\UTCDateTime(),
-            ]]
-        );
-
-        // Create checkout session with signup-specific URLs
-        $session = $stripe->createSignupCheckoutSession($customerId, $priceId, (string) $coachId);
-
-        Response::success([
-            'checkout_url' => $session['url'],
-            'tier'         => $tier,
-            'period'       => $period,
-        ], 'Ready for checkout');
     }
 
     /**
@@ -205,40 +205,40 @@ class SubscriptionController
 
         try {
             $stripe = new StripeService();
+            $priceId = $stripe->getPriceIdForTier($tier, $period);
+
+            if (empty($priceId)) {
+                Response::error('Stripe price not configured for this tier and period', 503);
+            }
+
+            // Create or reuse Stripe customer
+            $customerId = $coach['stripe_customer_id'] ?? null;
+            if (!$customerId) {
+                $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
+                $customerId = $customer['id'];
+                Database::collection('coaches')->updateOne(
+                    ['_id' => $coachId],
+                    ['$set' => ['stripe_customer_id' => $customerId]]
+                );
+            }
+
+            // Check if this is for signup flow (pending subscription) or upgrade flow
+            $isSignupFlow = ($coach['subscription_status'] ?? '') === 'pending';
+
+            if ($isSignupFlow) {
+                // Use signup-specific checkout with proper redirect URLs
+                $session = $stripe->createSignupCheckoutSession($customerId, $priceId, (string) $coachId);
+                Response::success(['checkout_url' => $session['url']], 'Checkout session created');
+            } else {
+                // Use embedded checkout for in-app upgrades
+                $session = $stripe->createEmbeddedCheckoutSession($customerId, $priceId, (string) $coachId);
+                Response::success([
+                    'client_secret' => $session['client_secret'],
+                    'session_id'    => $session['id'],
+                ], 'Checkout session created');
+            }
         } catch (\RuntimeException $e) {
-            Response::error('Payment processing is not configured. Please contact support.', 503);
-        }
-        $priceId = $stripe->getPriceIdForTier($tier, $period);
-
-        if (empty($priceId)) {
-            Response::error('Stripe price not configured for this tier and period', 500);
-        }
-
-        // Create or reuse Stripe customer
-        $customerId = $coach['stripe_customer_id'] ?? null;
-        if (!$customerId) {
-            $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
-            $customerId = $customer['id'];
-            Database::collection('coaches')->updateOne(
-                ['_id' => $coachId],
-                ['$set' => ['stripe_customer_id' => $customerId]]
-            );
-        }
-
-        // Check if this is for signup flow (pending subscription) or upgrade flow
-        $isSignupFlow = ($coach['subscription_status'] ?? '') === 'pending';
-
-        if ($isSignupFlow) {
-            // Use signup-specific checkout with proper redirect URLs
-            $session = $stripe->createSignupCheckoutSession($customerId, $priceId, (string) $coachId);
-            Response::success(['checkout_url' => $session['url']], 'Checkout session created');
-        } else {
-            // Use embedded checkout for in-app upgrades
-            $session = $stripe->createEmbeddedCheckoutSession($customerId, $priceId, (string) $coachId);
-            Response::success([
-                'client_secret' => $session['client_secret'],
-                'session_id'    => $session['id'],
-            ], 'Checkout session created');
+            Response::error('Payment processing error: ' . $e->getMessage(), 503);
         }
     }
 
@@ -254,23 +254,23 @@ class SubscriptionController
 
         try {
             $stripe  = new StripeService();
+
+            $customerId = $coach['stripe_customer_id'] ?? null;
+            if (!$customerId) {
+                $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
+                $customerId = $customer['id'];
+                Database::collection('coaches')->updateOne(
+                    ['_id' => $coachId],
+                    ['$set' => ['stripe_customer_id' => $customerId]]
+                );
+            }
+
+            $session = $stripe->createPortalSession($customerId);
+
+            Response::success(['portal_url' => $session['url']], 'Portal session created');
         } catch (\RuntimeException $e) {
-            Response::error('Payment processing is not configured. Please contact support.', 503);
+            Response::error('Payment processing error: ' . $e->getMessage(), 503);
         }
-
-        $customerId = $coach['stripe_customer_id'] ?? null;
-        if (!$customerId) {
-            $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
-            $customerId = $customer['id'];
-            Database::collection('coaches')->updateOne(
-                ['_id' => $coachId],
-                ['$set' => ['stripe_customer_id' => $customerId]]
-            );
-        }
-
-        $session = $stripe->createPortalSession($customerId);
-
-        Response::success(['portal_url' => $session['url']], 'Portal session created');
     }
 
     /**
@@ -290,17 +290,17 @@ class SubscriptionController
 
         try {
             $stripe = new StripeService();
+            $stripe->cancelSubscription($subId);
+
+            Database::collection('coaches')->updateOne(
+                ['_id' => $coachId],
+                ['$set' => ['cancel_at_period_end' => true, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
+            );
+
+            Response::success(null, 'Subscription will cancel at end of billing period');
         } catch (\RuntimeException $e) {
-            Response::error('Payment processing is not configured. Please contact support.', 503);
+            Response::error('Payment processing error: ' . $e->getMessage(), 503);
         }
-        $stripe->cancelSubscription($subId);
-
-        Database::collection('coaches')->updateOne(
-            ['_id' => $coachId],
-            ['$set' => ['cancel_at_period_end' => true, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
-        );
-
-        Response::success(null, 'Subscription will cancel at end of billing period');
     }
 
     /**
