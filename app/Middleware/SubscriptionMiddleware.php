@@ -3,14 +3,41 @@ declare(strict_types=1);
 
 namespace App\Middleware;
 
-/**
- * @deprecated Client limits have been removed. All tiers now support unlimited clients.
- * This middleware is kept as a no-op pass-through so existing route references do not break.
- */
+use App\Config\Database;
+use App\Controllers\SubscriptionController;
+use App\Helpers\Response;
+use MongoDB\BSON\ObjectId;
+
 class SubscriptionMiddleware
 {
+    /**
+     * Enforce client limit based on subscription tier.
+     * Use this middleware on routes that create new clients.
+     */
     public function handle(array &$params): void
     {
-        // No-op: unlimited clients for all tiers.
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
+
+        if (!$coach) {
+            Response::error('Coach not found', 404);
+            return;
+        }
+
+        $tier  = $coach['subscription_tier'] ?? 'free';
+        $limit = SubscriptionController::getClientLimit($tier);
+
+        $count = Database::collection('clients')->countDocuments([
+            'coach_id' => $coachId,
+            'active'   => true,
+        ]);
+
+        if ($count >= $limit) {
+            Response::error(
+                "Client limit reached ({$count}/{$limit}). Upgrade your plan to add more clients.",
+                403,
+                ['tier' => $tier, 'limit' => $limit, 'current' => $count, 'upgrade_required' => true]
+            );
+        }
     }
 }

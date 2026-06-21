@@ -310,208 +310,229 @@ class AnalyticsController
         ]);
     }
 
-    // GET /analytics/coach
+    // GET /analytics/coach  (coach-level aggregate stats)
     public function coachAnalytics(array $params): void
     {
-        $user     = $params['_auth'];
-        $coachId  = new ObjectId($user['sub']);
+        $coachId = new ObjectId($params['_auth']['sub']);
 
-        if ($user['role'] !== 'coach') Response::error('Forbidden', 403);
+        // ── 1. Client counts ───────────────────────────────────────────────
+        $totalClients = Database::collection('clients')->countDocuments([
+            'coach_id' => $coachId,
+            'active'   => true,
+        ]);
 
-        $clientsCol = Database::collection('clients');
-        $logsCol    = Database::collection('workout_logs');
-        $plansCol   = Database::collection('workout_plans');
+        $monthStart = new UTCDateTime((new \DateTime('first day of this month midnight'))->getTimestamp() * 1000);
+        $newClientsThisMonth = Database::collection('clients')->countDocuments([
+            'coach_id'   => $coachId,
+            'active'     => true,
+            'created_at' => ['$gte' => $monthStart],
+        ]);
 
-        // All clients
-        $clients = $clientsCol->find(['coach_id' => $coachId, 'active' => true]);
-        $clientIds = [];
-        $clientObjIds = [];
-        $totalClients = 0;
-        $newClientsThisMonth = 0;
-        $now = new \DateTime();
-        $monthStart = new \DateTime('first day of this month midnight');
-
-        foreach ($clients as $c) {
-            $totalClients++;
-            $cid = (string) $c['_id'];
-            $clientIds[] = $cid;
-            $clientObjIds[] = new ObjectId($cid);
-            if (isset($c['created_at'])) {
-                $created = $c['created_at']->toDateTime();
-                if ($created >= $monthStart) {
-                    $newClientsThisMonth++;
-                }
-            }
-        }
-
-        // Active clients (worked out in last 7 days)
+        // ── 2. Active clients (logged a workout in last 7 days) ────────────
         $sevenDaysAgo = new UTCDateTime((new \DateTime('-7 days'))->getTimestamp() * 1000);
+        $recentLogCursor = Database::collection('workout_logs')->find(
+            ['coach_id' => $coachId, 'completed_at' => ['$gte' => $sevenDaysAgo]],
+            ['projection' => ['client_id' => 1]]
+        );
         $activeClientIds = [];
-        if (!empty($clientObjIds)) {
-            $activeLogs = $logsCol->find([
-                'client_id'    => ['$in' => $clientObjIds],
-                'completed_at' => ['$gte' => $sevenDaysAgo],
-            ], ['projection' => ['client_id' => 1]]);
-            foreach ($activeLogs as $log) {
-                $activeClientIds[(string) $log['client_id']] = true;
-            }
+        foreach ($recentLogCursor as $log) {
+            $activeClientIds[(string) $log['client_id']] = true;
         }
         $activeClients = count($activeClientIds);
 
-        // Total workouts
-        $totalWorkouts = $logsCol->countDocuments(['client_id' => ['$in' => $clientObjIds]]);
+        // ── 3. Total workouts ──────────────────────────────────────────────
+        $totalWorkouts = Database::collection('workout_logs')->countDocuments(['coach_id' => $coachId]);
 
-        // Completion rate across all clients
-        $totalPlanned = 0;
-        $totalDone    = 0;
-        if (!empty($clientObjIds)) {
-            $plans = $plansCol->find(['client_id' => ['$in' => $clientObjIds]]);
-            foreach ($plans as $plan) {
-                $td = count($plan['days'] ?? []);
-                $cd = $logsCol->countDocuments([
-                    'client_id'       => $plan['client_id'],
+        // ── 4. Completion rate across all plans ────────────────────────────
+        $allPlans = Database::collection('workout_plans')
+            ->find(['coach_id' => $coachId], ['projection' => ['_id' => 1, 'days' => 1, 'client_id' => 1]])
+            ->toArray();
+
+        $totalPlanDays     = 0;
+        $completedPlanDays = 0;
+        foreach ($allPlans as $plan) {
+            $days = count($plan['days'] ?? []);
+            $totalPlanDays += $days;
+            if (!empty($plan['client_id'])) {
+                $completedPlanDays += Database::collection('workout_logs')->countDocuments([
+                    'coach_id'       => $coachId,
+                    'client_id'      => $plan['client_id'],
                     'workout_plan_id' => $plan['_id'],
                 ]);
-                $totalPlanned += $td;
-                $totalDone    += $cd;
             }
         }
-        $completionRate = $totalPlanned > 0 ? round(($totalDone / $totalPlanned) * 100) : 0;
+        $completionRate = $totalPlanDays > 0 ? (int) round(($completedPlanDays / $totalPlanDays) * 100) : 0;
 
-        // Top clients by workout volume (last 30 days)
+        // ── 5. Top clients by workout count (last 30 days) ─────────────────
         $thirtyDaysAgo = new UTCDateTime((new \DateTime('-30 days'))->getTimestamp() * 1000);
+        $recentLogs30 = Database::collection('workout_logs')->find(
+            ['coach_id' => $coachId, 'completed_at' => ['$gte' => $thirtyDaysAgo]],
+            ['projection' => ['client_id' => 1]]
+        );
+        $clientWorkoutCounts = [];
+        foreach ($recentLogs30 as $log) {
+            $cid = (string) $log['client_id'];
+            $clientWorkoutCounts[$cid] = ($clientWorkoutCounts[$cid] ?? 0) + 1;
+        }
+        arsort($clientWorkoutCounts);
+        $topClientIds = array_slice(array_keys($clientWorkoutCounts), 0, 5);
+
         $topClients = [];
-        if (!empty($clientObjIds)) {
-            $pipeline = [
-                ['$match' => [
-                    'client_id'    => ['$in' => $clientObjIds],
-                    'completed_at' => ['$gte' => $thirtyDaysAgo],
-                ]],
-                ['$group' => [
-                    '_id'       => '$client_id',
-                    'sessions'  => ['$sum' => 1],
-                ]],
-                ['$sort'  => ['sessions' => -1]],
-                ['$limit' => 5],
-            ];
-            $agg = $logsCol->aggregate($pipeline);
-            foreach ($agg as $doc) {
-                $client = $clientsCol->findOne(['_id' => $doc['_id']], ['projection' => ['name' => 1]]);
+        if (!empty($topClientIds)) {
+            $clientDocs = Database::collection('clients')->find([
+                '_id' => ['$in' => array_map(fn($id) => new ObjectId($id), $topClientIds)],
+            ], ['projection' => ['_id' => 1, 'name' => 1]])->toArray();
+            $clientNameMap = [];
+            foreach ($clientDocs as $c) {
+                $clientNameMap[(string) $c['_id']] = $c['name'] ?? 'Client';
+            }
+            foreach ($topClientIds as $cid) {
                 $topClients[] = [
-                    'id'       => (string) $doc['_id'],
-                    'name'     => $client['name'] ?? 'Unknown',
-                    'sessions' => $doc['sessions'],
+                    'id'       => $cid,
+                    'name'     => $clientNameMap[$cid] ?? 'Client',
+                    'sessions' => $clientWorkoutCounts[$cid],
                 ];
             }
         }
 
         Response::success([
-            'total_clients'         => $totalClients,
-            'active_clients'        => $activeClients,
-            'new_clients_this_month'=> $newClientsThisMonth,
-            'total_workouts'        => $totalWorkouts,
-            'completion_rate'       => $completionRate,
-            'top_clients'           => $topClients,
+            'total_clients'          => $totalClients,
+            'new_clients_this_month' => $newClientsThisMonth,
+            'active_clients'         => $activeClients,
+            'total_workouts'         => $totalWorkouts,
+            'completion_rate'        => $completionRate,
+            'top_clients'            => $topClients,
         ]);
     }
 
-    // GET /analytics/sessions — 1-on-1 coaching session analytics
+    // GET /analytics/sessions  (coaching session aggregate stats)
     public function sessionAnalytics(array $params): void
     {
-        $user    = $params['_auth'];
-        $coachId = new ObjectId($user['sub']);
+        $coachId = new ObjectId($params['_auth']['sub']);
 
-        if ($user['role'] !== 'coach') Response::error('Forbidden', 403);
+        $allSessions = Database::collection('coaching_sessions')
+            ->find(['coach_id' => $coachId], ['sort' => ['scheduled_at' => -1]])
+            ->toArray();
 
-        $col        = Database::collection('coaching_sessions');
-        $clientsCol = Database::collection('clients');
-        $baseFilter = ['coach_id' => $coachId];
+        // ── 1. Totals by status ────────────────────────────────────────────
+        $total    = count($allSessions);
+        $byStatus = ['upcoming' => 0, 'live' => 0, 'ended' => 0, 'cancelled' => 0];
+        foreach ($allSessions as $s) {
+            $st = $s['status'] ?? 'upcoming';
+            if (isset($byStatus[$st])) $byStatus[$st]++;
+        }
 
-        // ── Counts by status ──────────────────────────────────────────────
-        $statusCounts = ['upcoming' => 0, 'live' => 0, 'ended' => 0, 'cancelled' => 0];
-        foreach ($col->aggregate([
-            ['$match' => $baseFilter],
-            ['$group' => ['_id' => '$status', 'count' => ['$sum' => 1]]],
-        ]) as $doc) {
-            if (isset($statusCounts[$doc['_id']])) {
-                $statusCounts[$doc['_id']] = (int) $doc['count'];
+        // ── 2. This month ──────────────────────────────────────────────────
+        $monthStart = new UTCDateTime((new \DateTime('first day of this month midnight'))->getTimestamp() * 1000);
+        $thisMonth  = Database::collection('coaching_sessions')->countDocuments([
+            'coach_id'     => $coachId,
+            'scheduled_at' => ['$gte' => $monthStart],
+        ]);
+
+        // ── 3. Average duration (ended sessions with start + end times) ────
+        $totalDurationMin = 0;
+        $endedWithTimes   = 0;
+        foreach ($allSessions as $s) {
+            if (($s['status'] ?? '') === 'ended' && isset($s['started_at'], $s['ended_at'])) {
+                $start = $s['started_at'] instanceof UTCDateTime
+                    ? $s['started_at']->toDateTime()
+                    : new \DateTime((string) $s['started_at']);
+                $end   = $s['ended_at'] instanceof UTCDateTime
+                    ? $s['ended_at']->toDateTime()
+                    : new \DateTime((string) $s['ended_at']);
+                $diffMin = (int) round(($end->getTimestamp() - $start->getTimestamp()) / 60);
+                if ($diffMin > 0) {
+                    $totalDurationMin += $diffMin;
+                    $endedWithTimes++;
+                }
             }
         }
-        $total = array_sum($statusCounts);
+        $avgDurationMin = $endedWithTimes > 0 ? (int) round($totalDurationMin / $endedWithTimes) : null;
 
-        // ── Sessions created this month ───────────────────────────────────
-        $monthStart = new UTCDateTime((new \DateTime('first day of this month midnight'))->getTimestamp() * 1000);
-        $thisMonth  = $col->countDocuments(array_merge($baseFilter, [
-            'created_at' => ['$gte' => $monthStart],
-        ]));
-
-        // ── Average actual duration for ended sessions (minutes) ──────────
-        $avgDuration = 0;
-        foreach ($col->aggregate([
-            ['$match' => array_merge($baseFilter, [
-                'status'     => 'ended',
-                'started_at' => ['$ne' => null],
-                'ended_at'   => ['$ne' => null],
-            ])],
-            ['$project' => ['duration_ms' => ['$subtract' => ['$ended_at', '$started_at']]]],
-            ['$group'   => ['_id' => null, 'avg_ms' => ['$avg' => '$duration_ms']]],
-        ]) as $doc) {
-            $avgDuration = round($doc['avg_ms'] / 60000, 1);
-        }
-
-        // ── Top 5 clients by session count (last 30 days) ─────────────────
+        // ── 4. Top clients by session count (last 30 days) ─────────────────
         $thirtyDaysAgo = new UTCDateTime((new \DateTime('-30 days'))->getTimestamp() * 1000);
-        $topClients    = [];
-        foreach ($col->aggregate([
-            ['$match' => array_merge($baseFilter, ['scheduled_at' => ['$gte' => $thirtyDaysAgo]])],
-            ['$group' => ['_id' => '$client_id', 'sessions' => ['$sum' => 1]]],
-            ['$sort'  => ['sessions' => -1]],
-            ['$limit' => 5],
-        ]) as $doc) {
-            $client       = $clientsCol->findOne(['_id' => $doc['_id']], ['projection' => ['name' => 1]]);
-            $topClients[] = [
-                'id'       => (string) $doc['_id'],
-                'name'     => $client['name'] ?? 'Unknown',
-                'sessions' => (int) $doc['sessions'],
-            ];
+        $recent30 = array_filter($allSessions, function ($s) use ($thirtyDaysAgo) {
+            if (!isset($s['scheduled_at'])) return false;
+            $ts = $s['scheduled_at'] instanceof UTCDateTime
+                ? $s['scheduled_at']->toDateTime()->getTimestamp()
+                : strtotime((string) $s['scheduled_at']);
+            return $ts !== false && $ts >= ($thirtyDaysAgo->toDateTime()->getTimestamp());
+        });
+
+        $clientSessionCounts = [];
+        foreach ($recent30 as $s) {
+            $cid = (string) $s['client_id'];
+            $clientSessionCounts[$cid] = ($clientSessionCounts[$cid] ?? 0) + 1;
+        }
+        arsort($clientSessionCounts);
+        $topSessionClientIds = array_slice(array_keys($clientSessionCounts), 0, 5);
+
+        $topClients = [];
+        if (!empty($topSessionClientIds)) {
+            $clientDocs = Database::collection('clients')->find([
+                '_id' => ['$in' => array_map(fn($id) => new ObjectId($id), $topSessionClientIds)],
+            ], ['projection' => ['_id' => 1, 'name' => 1]])->toArray();
+            $clientNameMap = [];
+            foreach ($clientDocs as $c) {
+                $clientNameMap[(string) $c['_id']] = $c['name'] ?? 'Client';
+            }
+            foreach ($topSessionClientIds as $cid) {
+                $topClients[] = [
+                    'id'       => $cid,
+                    'name'     => $clientNameMap[$cid] ?? 'Client',
+                    'sessions' => $clientSessionCounts[$cid],
+                ];
+            }
         }
 
-        // ── 5 most recent sessions ────────────────────────────────────────
+        // ── 5. Recent 10 sessions ──────────────────────────────────────────
+        $recentSessions = array_slice($allSessions, 0, 10);
+        $recentClientIds = array_unique(array_map(fn($s) => (string) $s['client_id'], $recentSessions));
+        $recentClientDocs = Database::collection('clients')->find([
+            '_id' => ['$in' => array_map(fn($id) => new ObjectId($id), $recentClientIds)],
+        ], ['projection' => ['_id' => 1, 'name' => 1]])->toArray();
+        $recentClientMap = [];
+        foreach ($recentClientDocs as $c) {
+            $recentClientMap[(string) $c['_id']] = $c['name'] ?? 'Client';
+        }
+
         $recent = [];
-        foreach ($col->find($baseFilter, ['sort' => ['scheduled_at' => -1], 'limit' => 5]) as $s) {
-            $client   = $clientsCol->findOne(['_id' => $s['client_id']], ['projection' => ['name' => 1]]);
+        foreach ($recentSessions as $s) {
+            $scheduledAt = null;
+            if (isset($s['scheduled_at'])) {
+                $dt = $s['scheduled_at'] instanceof UTCDateTime
+                    ? $s['scheduled_at']->toDateTime()
+                    : new \DateTime((string) $s['scheduled_at']);
+                $scheduledAt = $dt->format(DATE_ATOM);
+            }
+            $durationMin = null;
+            if (isset($s['started_at'], $s['ended_at'])) {
+                $start = $s['started_at'] instanceof UTCDateTime
+                    ? $s['started_at']->toDateTime()
+                    : new \DateTime((string) $s['started_at']);
+                $end   = $s['ended_at'] instanceof UTCDateTime
+                    ? $s['ended_at']->toDateTime()
+                    : new \DateTime((string) $s['ended_at']);
+                $diff  = (int) round(($end->getTimestamp() - $start->getTimestamp()) / 60);
+                if ($diff > 0) $durationMin = $diff;
+            }
             $recent[] = [
                 'id'           => (string) $s['_id'],
                 'title'        => $s['title'] ?? '',
-                'client_name'  => $client['name'] ?? 'Unknown',
+                'client_name'  => $recentClientMap[(string) $s['client_id']] ?? 'Client',
                 'status'       => $s['status'] ?? 'upcoming',
-                'scheduled_at' => isset($s['scheduled_at']) ? $s['scheduled_at']->toDateTime()->format('c') : null,
-                'duration_min' => $s['duration_min'] ?? null,
+                'scheduled_at' => $scheduledAt,
+                'duration_min' => $durationMin,
             ];
-        }
-
-        // ── Monthly trend (last 6 months) ─────────────────────────────────
-        $sixMonthsAgo = new UTCDateTime((new \DateTime('-6 months'))->getTimestamp() * 1000);
-        $trend        = [];
-        foreach ($col->aggregate([
-            ['$match'  => array_merge($baseFilter, ['scheduled_at' => ['$gte' => $sixMonthsAgo]])],
-            ['$group'  => [
-                '_id'   => ['$dateToString' => ['format' => '%Y-%m', 'date' => '$scheduled_at']],
-                'count' => ['$sum' => 1],
-            ]],
-            ['$sort'   => ['_id' => 1]],
-        ]) as $doc) {
-            $trend[] = ['month' => $doc['_id'], 'count' => (int) $doc['count']];
         }
 
         Response::success([
             'total'            => $total,
-            'by_status'        => $statusCounts,
             'this_month'       => $thisMonth,
-            'avg_duration_min' => $avgDuration,
+            'by_status'        => $byStatus,
+            'avg_duration_min' => $avgDurationMin,
             'top_clients'      => $topClients,
             'recent'           => $recent,
-            'monthly_trend'    => $trend,
         ]);
     }
 }

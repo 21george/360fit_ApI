@@ -209,6 +209,39 @@ class CoachController {
         Response::success(null, 'Profile photo deleted');
     }
 
+    // GET /coaches/registered — list all active coaches (public directory)
+    public function index(array $params): void {
+        $coaches = Database::collection('coaches')->find(
+            ['active' => ['$ne' => false]],
+            [
+                'projection' => ['password_hash' => 0, 'stripe_customer_id' => 0],
+                'sort'       => ['created_at' => -1],
+                'limit'      => 100,
+            ]
+        )->toArray();
+
+        Response::success(array_map(fn($c) => $this->format($c), $coaches));
+    }
+
+    // DELETE /coach/profile — soft-delete the authenticated coach account
+    public function deleteAccount(array $params): void {
+        $coachId = new ObjectId($params['_auth']['sub']);
+
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'active'     => false,
+                'deleted_at' => new UTCDateTime(),
+                'updated_at' => new UTCDateTime(),
+            ]]
+        );
+
+        // Expire all refresh tokens by removing them
+        Database::collection('refresh_tokens')->deleteMany(['coach_id' => $coachId]);
+
+        Response::success(null, 'Account deleted');
+    }
+
     public function changePassword(array $params): void {
         $body    = Request::body();
         $coachId = $params['_auth']['sub'];
@@ -240,46 +273,6 @@ class CoachController {
         Response::success(null, 'Password changed successfully');
     }
 
-    public function destroy(array $params): void
-    {
-        $coachId = $params['_auth']['sub'];
-
-        $coach = Database::collection('coaches')->findOne(
-            ['_id' => new ObjectId($coachId)],
-            ['projection' => ['profile_photo_key' => 1]]
-        );
-
-        if (!$coach) {
-            Response::error('Coach not found', 404);
-        }
-
-        // Delete profile photo from storage if present
-        if (!empty($coach['profile_photo_key'])) {
-            $key = (string) $coach['profile_photo_key'];
-            if (str_starts_with($key, 'local:')) {
-                $path = BASE_PATH . '/public/' . substr($key, 6);
-                if (is_file($path)) @unlink($path);
-            } elseif (\App\Services\S3Service::isConfigured()) {
-                \App\Services\S3Service::delete($key);
-            }
-        }
-
-        Database::collection('coaches')->deleteOne(['_id' => new ObjectId($coachId)]);
-
-        Response::success(null, 'Account deleted permanently');
-    }
-
-    public function index(array $params): void
-    {
-        $coaches = Database::collection('coaches')->find(
-            [],
-            ['projection' => ['password_hash' => 0], 'sort' => ['created_at' => -1], 'limit' => 200]
-        )->toArray();
-
-        $data = array_map(fn($c) => $this->format($c), $coaches);
-        Response::success($data);
-    }
-
     private function format($coach): array {
         $tier = $coach['subscription_tier'] ?? 'free';
         return [
@@ -302,7 +295,7 @@ class CoachController {
             'job_title'              => $coach['job_title'] ?? '',
             'responsibilities'       => $coach['responsibilities'] ?? '',
             'client_count'           => $coach['client_count'] ?? 0,
-            'max_clients'            => SubscriptionController::getClientLimit($tier),
+            'max_clients'            => \App\Controllers\SubscriptionController::getClientLimit($tier),
             'subscription_tier'      => $tier,
             'subscription_status'    => $coach['subscription_status'] ?? 'none',
             'trial_ends_at'          => isset($coach['trial_ends_at']) ? (string) $coach['trial_ends_at'] : null,

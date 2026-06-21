@@ -5,26 +5,8 @@ namespace App\Helpers;
 
 class Request
 {
-    private static ?string $testBody = null;
-
-    public static function setTestBody(?string $json): void
-    {
-        self::$testBody = $json;
-    }
-
     public static function body(): array
     {
-        if (self::$testBody !== null) {
-            $raw = self::$testBody;
-            self::$testBody = null;
-            if (empty($raw)) return [];
-            try {
-                return json_decode($raw, true, 512, JSON_THROW_ON_ERROR) ?? [];
-            } catch (\JsonException) {
-                return [];
-            }
-        }
-
         $raw = file_get_contents('php://input');
         if (empty($raw)) return [];
         try {

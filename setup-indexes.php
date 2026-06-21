@@ -34,6 +34,7 @@ $db->getCollection('workout_logs')->createIndex(['workout_plan_id' => 1]);
 
 // nutrition_plans
 $db->getCollection('nutrition_plans')->createIndex(['client_id' => 1, 'week_start' => -1]);
+$db->getCollection('nutrition_plans')->createIndex(['client_ids' => 1]);
 $db->getCollection('nutrition_plans')->createIndex(['coach_id' => 1]);
 
 // checkin_meetings
@@ -70,15 +71,11 @@ $db->getCollection('live_training_requests')->createIndex(['session_id' => 1, 'c
 // live_training_chat
 $db->getCollection('live_training_chat')->createIndex(['session_id' => 1, 'sent_at' => 1]);
 
-// coaching_sessions (1-on-1)
-$db->getCollection('coaching_sessions')->createIndex(['coach_id' => 1, 'status' => 1]);
-$db->getCollection('coaching_sessions')->createIndex(['coach_id' => 1, 'scheduled_at' => -1]);
-$db->getCollection('coaching_sessions')->createIndex(['coach_id' => 1, 'client_id' => 1]);
-$db->getCollection('coaching_sessions')->createIndex(['coach_id' => 1, 'created_at' => -1]);
-
-// client_workout_analyses
-$db->getCollection('client_workout_analyses')->createIndex(['client_id' => 1, 'generated_at' => -1]);
-$db->getCollection('client_workout_analyses')->createIndex(['coach_id' => 1, 'status' => 1]);
+// notifications
+$db->getCollection('notifications')->createIndex(['user_id' => 1, 'read' => 1]);
+$db->getCollection('notifications')->createIndex(['user_id' => 1, 'user_type' => 1, 'read' => 1]);
+$db->getCollection('notifications')->createIndex(['user_id' => 1, 'sent_at' => -1]);
+$db->getCollection('notifications')->createIndex(['user_id' => 1, 'user_type' => 1, 'sent_at' => -1]);
 
 // rate_limits
 $db->getCollection('rate_limits')->createIndex(['expires_at' => 1], ['expireAfterSeconds' => 0]);

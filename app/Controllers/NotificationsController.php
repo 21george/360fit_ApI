@@ -151,7 +151,7 @@ class NotificationsController
         $type = Request::get('type');
         $unreadOnly = Request::get('unread') === 'true';
 
-        $filter = ['user_id' => $coachId, 'user_type' => 'coach'];
+        $filter = ['user_id' => $coachId];
         if (is_string($type) && $type !== '') {
             $filter['type'] = $type;
         }
@@ -191,7 +191,6 @@ class NotificationsController
 
         $count = $collection->countDocuments([
             'user_id' => $coachId,
-            'user_type' => 'coach',
             'read' => false,
         ]);
 
@@ -217,7 +216,6 @@ class NotificationsController
         $notification = $collection->findOne([
             '_id' => $notificationId,
             'user_id' => $coachId,
-            'user_type' => 'coach',
         ]);
 
         if (!$notification) {
@@ -249,7 +247,7 @@ class NotificationsController
         $collection = Database::collection('notifications');
 
         $result = $collection->updateMany(
-            ['user_id' => $coachId, 'user_type' => 'coach', 'read' => false],
+            ['user_id' => $coachId, 'read' => false],
             ['$set' => ['read' => true]]
         );
 
@@ -275,7 +273,6 @@ class NotificationsController
         $result = $collection->deleteOne([
             '_id' => $notificationId,
             'user_id' => $coachId,
-            'user_type' => 'coach',
         ]);
 
         if ($result->getDeletedCount() === 0) {
@@ -291,18 +288,6 @@ class NotificationsController
      */
     private function format(object $doc): array
     {
-        $sentAt = null;
-        if (isset($doc['sent_at'])) {
-            $ts = $doc['sent_at'];
-            if ($ts instanceof \MongoDB\BSON\UTCDateTime) {
-                $sentAt = $ts->toDateTime()->format('Y-m-d H:i:s');
-            } elseif (is_numeric($ts)) {
-                $sentAt = date('Y-m-d H:i:s', (int) ($ts / 1000));
-            } elseif (is_string($ts)) {
-                $sentAt = $ts;
-            }
-        }
-
         return [
             'id' => (string) $doc['_id'],
             'type' => $doc['type'],
@@ -310,7 +295,7 @@ class NotificationsController
             'body' => $doc['body'],
             'data' => $doc['data'] ?? [],
             'read' => $doc['read'] ?? false,
-            'sent_at' => $sentAt,
+            'sent_at' => $doc['sent_at'] ? date('Y-m-d H:i:s', (int) (((string) $doc['sent_at']) / 1000)) : null,
         ];
     }
 }

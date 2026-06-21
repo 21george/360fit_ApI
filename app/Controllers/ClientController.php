@@ -29,7 +29,7 @@ class ClientController
     {
         $clientId = new ObjectId($params['_auth']['sub']);
         $body = Request::body();
-        $allowed = ['name', 'email', 'language', 'profile_photo_url', 'phone', 'address', 'city', 'postal_code', 'nationality', 'occupation', 'date_of_birth', 'current_weight_kg', 'height_cm', 'chest_cm', 'waist_cm', 'body_fat_pct', 'bmi', 'lean_mass_kg', 'sickness'];
+        $allowed = ['name', 'language', 'profile_photo_url', 'phone', 'address', 'city', 'postal_code', 'nationality', 'occupation'];
         $set = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
 
         foreach ($allowed as $field) {
@@ -145,25 +145,16 @@ class ClientController
         $search   = Request::get('search', '');
         $page     = max(1, (int) Request::get('page', 1));
         $perPage  = 20;
+        $filter   = ['coach_id' => $coachId];
 
-        // Show active clients and blocked clients; exclude soft-deleted (active=false, is_blocked=false)
-        $filter = [
-            '$and' => [
-                ['coach_id' => $coachId],
-                ['$or' => [
-                    ['active' => true],
-                    ['is_blocked' => true],
-                ]],
-            ],
-        ];
+        // Include both active and blocked clients (exclude only soft-deleted)
+        $filter['active'] = ['$in' => [true, false]];
 
         if ($search) {
             $escaped = preg_quote($search, '/');
-            $filter['$and'][] = [
-                '$or' => [
-                    ['name'  => ['$regex' => $escaped, '$options' => 'i']],
-                    ['email' => ['$regex' => $escaped, '$options' => 'i']],
-                ],
+            $filter['$or'] = [
+                ['name'  => ['$regex' => $escaped, '$options' => 'i']],
+                ['email' => ['$regex' => $escaped, '$options' => 'i']],
             ];
         }
 
@@ -194,6 +185,15 @@ class ClientController
 
         $col = Database::collection('clients');
 
+        // Use subscription tier limit
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        $tier  = $coach['subscription_tier'] ?? 'free';
+        $cap   = SubscriptionController::getClientLimit($tier);
+        $count = $col->countDocuments(['coach_id' => $coachId, 'active' => true]);
+        if ($count >= $cap) {
+            Response::error("Client limit of {$cap} reached. Upgrade your plan to add more clients.", 403);
+        }
+
         $code      = CodeService::generate();
         $codeHash  = CodeService::hash($code);
         $codeLookup = CodeService::lookupHash($code);
@@ -209,15 +209,6 @@ class ClientController
             'postal_code'       => $body['postal_code'] ?? null,
             'nationality'       => $body['nationality'] ?? null,
             'occupation'        => $body['occupation'] ?? null,
-            'date_of_birth'     => $body['date_of_birth'] ?? null,
-            'current_weight_kg' => isset($body['current_weight_kg']) ? (float) $body['current_weight_kg'] : null,
-            'height_cm'         => isset($body['height_cm']) ? (int) $body['height_cm'] : null,
-            'chest_cm'          => isset($body['chest_cm']) ? (float) $body['chest_cm'] : null,
-            'waist_cm'          => isset($body['waist_cm']) ? (float) $body['waist_cm'] : null,
-            'body_fat_pct'      => isset($body['body_fat_pct']) ? (float) $body['body_fat_pct'] : null,
-            'bmi'               => isset($body['bmi']) ? (float) $body['bmi'] : null,
-            'lean_mass_kg'      => isset($body['lean_mass_kg']) ? (float) $body['lean_mass_kg'] : null,
-            'sickness'          => $body['sickness'] ?? null,
             'login_code_hash'   => $codeHash,
             'code_lookup'       => $codeLookup,
             'active'            => true,
@@ -232,156 +223,18 @@ class ClientController
 
         // Send login code email if client has email
         $emailSent = false;
-        $emailError = null;
         if (!empty($body['email'])) {
-            try {
-                $coach     = Database::collection('coaches')->findOne(['_id' => $coachId]);
-                $coachName  = $coach['name']  ?? 'Your Coach';
-                $coachEmail = $coach['email'] ?? '';
-                $emailSent  = EmailService::sendClientLoginCode(
-                    trim((string) $body['email']),
-                    $body['name'],
-                    $coachName,
-                    $code,
-                    $coachEmail
-                );
-                if (!$emailSent) {
-                    $emailError = 'Mail delivery returned false — check server mail config';
-                }
-            } catch (\Throwable $e) {
-                $emailError = $e->getMessage();
-                error_log('Failed to send welcome email to client: ' . $emailError);
-            }
+            $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+            $coachName = $coach['name'] ?? 'Your Coach';
+            $emailSent = EmailService::sendClientLoginCode($body['email'], $body['name'], $coachName, $code);
         }
 
         Response::success([
-            'id'          => (string) $result->getInsertedId(),
-            'name'        => $body['name'],
-            'login_code'  => $code,        // shown ONCE to coach
-            'email_sent'  => $emailSent,
-            'email_error' => $emailError,  // null on success
+            'id'         => (string) $result->getInsertedId(),
+            'name'       => $body['name'],
+            'login_code' => $code,  // shown ONCE to coach
+            'email_sent' => $emailSent,
         ], 'Client created', 201);
-    }
-
-    // POST /coach/clients/import
-    public function import(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $body    = Request::body();
-        $rows    = $body['clients'] ?? [];
-
-        if (!is_array($rows) || empty($rows)) {
-            Response::error('No clients provided. Expecting {clients: [...]}', 422);
-        }
-
-        // Fetch coach info once for email personalisation
-        $coach      = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        $coachName  = $coach['name']  ?? 'Your Coach';
-        $coachEmail = $coach['email'] ?? '';
-
-        $col        = Database::collection('clients');
-        $created    = 0;
-        $failed     = 0;
-        $errors     = [];
-        $loginCodes = [];
-
-        foreach ($rows as $idx => $row) {
-            $name = trim($row['name'] ?? $row['full_name'] ?? '');
-            if (empty($name)) {
-                $failed++;
-                $errors[] = ['index' => $idx, 'field' => 'name', 'message' => 'Name is required'];
-                continue;
-            }
-
-            $code       = CodeService::generate();
-            $codeHash   = CodeService::hash($code);
-            $codeLookup = CodeService::lookupHash($code);
-
-            // Age → date_of_birth (approximate: Jan 1 of birth year)
-            $dob = null;
-            $age = isset($row['age']) ? (int) $row['age'] : null;
-            if ($age !== null && $age > 0) {
-                $birthYear = (int) date('Y') - $age;
-                $dob = "{$birthYear}-01-01";
-            }
-
-            try {
-                $result = $col->insertOne([
-                    'coach_id'          => $coachId,
-                    'name'              => $name,
-                    'email'             => !empty($row['email']) ? trim((string) $row['email']) : null,
-                    'phone'             => $row['phone'] ?? null,
-                    'language'          => 'en',
-                    'address'           => $row['address'] ?? null,
-                    'city'              => !empty($row['location']) ? trim((string) $row['location']) : ($row['city'] ?? null),
-                    'postal_code'       => $row['postal_code'] ?? null,
-                    'nationality'       => $row['nationality'] ?? null,
-                    'occupation'        => $row['occupation'] ?? null,
-                    'date_of_birth'     => $dob ?? ($row['date_of_birth'] ?? null),
-                    'current_weight_kg' => isset($row['weight']) ? (float) $row['weight'] : (isset($row['current_weight_kg']) ? (float) $row['current_weight_kg'] : null),
-                    'height_cm'         => isset($row['height']) ? (int) $row['height'] : (isset($row['height_cm']) ? (int) $row['height_cm'] : null),
-                    'chest_cm'          => isset($row['chest_cm']) ? (float) $row['chest_cm'] : null,
-                    'waist_cm'          => isset($row['waist_cm']) ? (float) $row['waist_cm'] : null,
-                    'body_fat_pct'      => isset($row['body_fat_pct']) ? (float) $row['body_fat_pct'] : null,
-                    'bmi'               => isset($row['bmi']) ? (float) $row['bmi'] : null,
-                    'lean_mass_kg'      => isset($row['lean_mass_kg']) ? (float) $row['lean_mass_kg'] : null,
-                    'sickness'          => $row['sickness'] ?? null,
-                    'login_code_hash'   => $codeHash,
-                    'code_lookup'       => $codeLookup,
-                    'active'            => true,
-                    'is_blocked'        => false,
-                    'token_version'     => 0,
-                    'fcm_token'         => null,
-                    'profile_photo_url' => null,
-                    'notes'             => $row['notes'] ?? null,
-                    'created_at'        => new \MongoDB\BSON\UTCDateTime(),
-                    'updated_at'        => new \MongoDB\BSON\UTCDateTime(),
-                ]);
-
-                $created++;
-                $clientEmail = !empty($row['email']) ? trim((string) $row['email']) : '';
-
-                // Send welcome email with login code if the client has an email address
-                $emailSent = false;
-                if (!empty($clientEmail) && filter_var($clientEmail, FILTER_VALIDATE_EMAIL)) {
-                    try {
-                        $emailSent = EmailService::sendClientLoginCode(
-                            $clientEmail,
-                            $name,
-                            $coachName,
-                            $code,
-                            $coachEmail
-                        );
-                    } catch (\Throwable $mailEx) {
-                        error_log("Import: failed to email {$clientEmail} for client {$name}: " . $mailEx->getMessage());
-                    }
-                }
-
-                $loginCodes[] = [
-                    'id'         => (string) $result->getInsertedId(),
-                    'name'       => $name,
-                    'email'      => $clientEmail ?: null,
-                    'login_code' => $code,
-                    'email_sent' => $emailSent,
-                ];
-            } catch (\Throwable $e) {
-                $failed++;
-                $errors[] = ['index' => $idx, 'field' => null, 'message' => $e->getMessage()];
-            }
-        }
-
-        $emailsSent = count(array_filter($loginCodes, fn($c) => $c['email_sent']));
-        $emailsSkipped = count(array_filter($loginCodes, fn($c) => $c['email'] === null));
-
-        Response::success([
-            'created'        => $created,
-            'failed'         => $failed,
-            'total'          => count($rows),
-            'errors'         => $errors,
-            'emails_sent'    => $emailsSent,
-            'emails_skipped' => $emailsSkipped,
-            'login_codes'    => $loginCodes,
-        ], "Imported {$created} of " . count($rows) . " clients ({$emailsSent} welcome emails sent)", $failed > 0 ? 207 : 200);
     }
 
     // GET /coach/clients/:id
@@ -396,7 +249,7 @@ class ClientController
     {
         $client  = $this->findClient($params, includeBlocked: true);
         $body    = Request::body();
-        $allowed = ['name', 'email', 'phone', 'language', 'notes', 'address', 'city', 'postal_code', 'nationality', 'occupation', 'date_of_birth', 'current_weight_kg', 'height_cm', 'chest_cm', 'waist_cm', 'body_fat_pct', 'bmi', 'lean_mass_kg', 'sickness'];
+        $allowed = ['name', 'email', 'phone', 'language', 'notes', 'address', 'city', 'postal_code', 'nationality', 'occupation'];
         $set     = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
 
         foreach ($allowed as $field) {
@@ -570,6 +423,104 @@ class ClientController
         ]);
     }
 
+    // POST /coach/clients/import  — bulk import clients from JSON array
+    public function import(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $body    = Request::body();
+
+        if (empty($body['clients']) || !is_array($body['clients'])) {
+            Response::error('clients array is required', 422);
+            return;
+        }
+
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        $tier  = $coach['subscription_tier'] ?? 'free';
+        $cap   = SubscriptionController::getClientLimit($tier);
+        $existingCount = Database::collection('clients')->countDocuments(['coach_id' => $coachId, 'active' => true]);
+
+        $created   = 0;
+        $failed    = 0;
+        $errors    = [];
+        $loginCodes = [];
+
+        foreach ($body['clients'] as $index => $row) {
+            $name = trim((string) ($row['full_name'] ?? $row['name'] ?? ''));
+            if ($name === '') {
+                $errors[] = ['index' => $index, 'field' => 'name', 'message' => 'Name is required'];
+                $failed++;
+                continue;
+            }
+
+            if (($existingCount + $created) >= $cap) {
+                $errors[] = ['index' => $index, 'field' => null, 'message' => "Client limit of {$cap} reached"];
+                $failed++;
+                continue;
+            }
+
+            $code       = CodeService::generate();
+            $codeHash   = CodeService::hash($code);
+            $codeLookup = CodeService::lookupHash($code);
+
+            $email = !empty($row['email']) ? trim((string) $row['email']) : null;
+
+            $doc = [
+                'coach_id'         => $coachId,
+                'name'             => $name,
+                'email'            => $email,
+                'phone'            => !empty($row['phone']) ? trim((string) $row['phone']) : null,
+                'age'              => !empty($row['age']) ? (int) $row['age'] : null,
+                'location'         => !empty($row['location']) ? trim((string) $row['location']) : null,
+                'city'             => !empty($row['city']) ? trim((string) $row['city']) : null,
+                'weight'           => !empty($row['weight']) ? (float) $row['weight'] : null,
+                'height'           => !empty($row['height']) ? (float) $row['height'] : null,
+                'notes'            => !empty($row['notes']) ? trim((string) $row['notes']) : null,
+                'login_code_hash'  => $codeHash,
+                'code_lookup'      => $codeLookup,
+                'active'           => true,
+                'is_blocked'       => false,
+                'created_at'       => new \MongoDB\BSON\UTCDateTime(),
+                'updated_at'       => new \MongoDB\BSON\UTCDateTime(),
+            ];
+
+            $result  = Database::collection('clients')->insertOne($doc);
+            $clientId = (string) $result->getInsertedId();
+
+            $emailSent  = false;
+            if ($email) {
+                try {
+                    $emailService = new EmailService();
+                    $emailService->sendClientWelcome($email, $name, $code, $coach['name'] ?? 'Your Coach');
+                    $emailSent = true;
+                } catch (\Throwable $e) {
+                    error_log('Import: failed to send welcome email to ' . $email . ': ' . $e->getMessage());
+                }
+            }
+
+            $loginCodes[] = [
+                'id'         => $clientId,
+                'name'       => $name,
+                'email'      => $email,
+                'login_code' => $code,
+                'email_sent' => $emailSent,
+            ];
+            $created++;
+        }
+
+        $emailsSent    = count(array_filter($loginCodes, fn($c) => $c['email_sent']));
+        $emailsSkipped = count(array_filter($loginCodes, fn($c) => !$c['email_sent'] && $c['email'] === null));
+
+        Response::success([
+            'created'        => $created,
+            'failed'         => $failed,
+            'total'          => count($body['clients']),
+            'errors'         => $errors,
+            'emails_sent'    => $emailsSent,
+            'emails_skipped' => $emailsSkipped,
+            'login_codes'    => $loginCodes,
+        ], "{$created} client(s) imported", 201);
+    }
+
     private function findClient(array $params, bool $includeBlocked = false): object
     {
         $coachId  = new ObjectId($params['_auth']['sub']);
@@ -583,7 +534,9 @@ class ClientController
         }
         $client = Database::collection('clients')->findOne($filter, ['projection' => ['login_code_hash' => 0]]);
 
-        if (!$client) Response::error('Client not found', 404);
+        if (!$client) {
+            Response::error('Client not found', 404);
+        }
         return $client;
     }
 
@@ -600,15 +553,6 @@ class ClientController
             'postal_code'       => $doc['postal_code'] ?? null,
             'nationality'       => $doc['nationality'] ?? null,
             'occupation'        => $doc['occupation'] ?? null,
-            'date_of_birth'     => $doc['date_of_birth'] ?? null,
-            'current_weight_kg' => $doc['current_weight_kg'] ?? null,
-            'height_cm'         => $doc['height_cm'] ?? null,
-            'chest_cm'          => $doc['chest_cm'] ?? null,
-            'waist_cm'          => $doc['waist_cm'] ?? null,
-            'body_fat_pct'      => $doc['body_fat_pct'] ?? null,
-            'bmi'               => $doc['bmi'] ?? null,
-            'lean_mass_kg'      => $doc['lean_mass_kg'] ?? null,
-            'sickness'          => $doc['sickness'] ?? null,
             'profile_photo_url' => $doc['profile_photo_url'] ?? null,
             'notes'             => $doc['notes'] ?? null,
             'active'            => $doc['active'],

@@ -201,19 +201,8 @@ class WorkoutPlanController
         foreach ($allowed as $field) {
             if (isset($body[$field])) {
                 if ($field === 'week_start') {
-                    $ts = strtotime($body[$field]);
-                    if ($ts === false) {
-                        Response::error('Invalid week_start', 422);
-                        return;
-                    }
-                    $set[$field] = new \MongoDB\BSON\UTCDateTime($ts * 1000);
+                    $set[$field] = new \MongoDB\BSON\UTCDateTime(strtotime($body[$field]) * 1000);
                 } elseif ($field === 'client_ids' && is_array($body[$field])) {
-                    foreach ($body[$field] as $id) {
-                        if (!is_string($id) || !preg_match('/^[a-f0-9]{24}$/i', $id)) {
-                            Response::error('Invalid client ID', 400);
-                            return;
-                        }
-                    }
                     $set[$field] = array_map(fn($id) => new ObjectId($id), $body[$field]);
                 } else {
                     $set[$field] = $body[$field];
@@ -311,6 +300,10 @@ class WorkoutPlanController
             ]);
             if (!$client) {
                 Response::error('Client not found: ' . (string) $id, 404);
+                return;
+            }
+            if (!($client['active'] ?? true)) {
+                Response::error('Client is inactive: ' . (string) $id, 422);
                 return;
             }
             $clientObjects[] = $client;
@@ -616,7 +609,7 @@ class WorkoutPlanController
             'assigned_client' => $assignedClient,
             'group_name'      => $doc['group_name'] ?? null,
             'title'           => $doc['title'],
-            'week_start'      => $doc['week_start'] ? date('Y-m-d', (int)((string)$doc['week_start']) / 1000) : null,
+            'week_start'      => $doc['week_start'] ? date('Y-m-d', (int)(((string)$doc['week_start']) / 1000)) : null,
             'status'          => $doc['status'],
             'notes'           => $doc['notes'] ?? null,
             'created_at'      => (string) ($doc['created_at'] ?? ''),

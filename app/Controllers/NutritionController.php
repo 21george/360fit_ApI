@@ -23,6 +23,18 @@ class NutritionController
             ];
         }
 
+        // Status filter (active, draft, completed)
+        $status = Request::get('status');
+        if (is_string($status) && $status !== '') {
+            $filter['status'] = $status;
+        }
+
+        // Plan type filter (individual, group, team)
+        $planType = Request::get('plan_type');
+        if (is_string($planType) && $planType !== '') {
+            $filter['plan_type'] = $planType;
+        }
+
         $plans = Database::collection('nutrition_plans')->find($filter, [
             'sort'       => ['created_at' => -1],
             'projection' => ['days' => 0],
@@ -50,11 +62,15 @@ class NutritionController
         $result = Database::collection('nutrition_plans')->insertOne([
             'coach_id'     => $coachId,
             'client_id'    => $clientId,
+            'client_ids'   => array_map(fn($id) => new ObjectId($id), $body['client_ids'] ?? [$body['client_id']]),
+            'plan_type'    => $body['plan_type'] ?? 'individual',
+            'group_name'   => $body['group_name'] ?? null,
             'title'        => $body['title'],
             'week_start'   => new \MongoDB\BSON\UTCDateTime(strtotime($body['week_start']) * 1000),
             'daily_totals' => $body['daily_totals'] ?? ['calories' => 0, 'protein_g' => 0, 'carbs_g' => 0, 'fat_g' => 0],
             'days'         => $body['days'] ?? [],
             'notes'        => $body['notes'] ?? null,
+            'status'       => $body['status'] ?? 'draft',
             'created_at'   => new \MongoDB\BSON\UTCDateTime(),
             'updated_at'   => new \MongoDB\BSON\UTCDateTime(),
         ]);
@@ -74,7 +90,7 @@ class NutritionController
     {
         $plan    = $this->findPlan($params);
         $body    = Request::body();
-        $allowed = ['title', 'daily_totals', 'days', 'notes', 'week_start'];
+        $allowed = ['title', 'daily_totals', 'days', 'notes', 'week_start', 'status', 'plan_type', 'group_name'];
         $set     = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
 
         foreach ($allowed as $field) {
@@ -127,7 +143,6 @@ class NutritionController
             Response::error('client_ids is required', 422);
             return;
         }
-
         if (!is_array($clientIds)) {
             $clientIds = [$clientIds];
         }
@@ -135,15 +150,15 @@ class NutritionController
         $clientObjects = [];
         foreach ($clientIds as $id) {
             try {
-                $clientId = $id instanceof ObjectId ? $id : new ObjectId((string) $id);
+                $clientObjId = $id instanceof ObjectId ? $id : new ObjectId((string) $id);
             } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
                 Response::error('Invalid client ID: ' . (string) $id, 400);
                 return;
             }
-
             $client = Database::collection('clients')->findOne([
-                '_id'      => $clientId,
+                '_id'      => $clientObjId,
                 'coach_id' => $coachId,
+                'active'   => true,
             ]);
             if (!$client) {
                 Response::error('Client not found: ' . (string) $id, 404);
@@ -152,17 +167,17 @@ class NutritionController
             $clientObjects[] = $client;
         }
 
-        $isGroup = count($clientIds) > 1;
-        $update = [
+        $isGroup = count($clientObjects) > 1;
+        $update  = [
             'plan_type'  => $isGroup ? 'group' : 'individual',
             'updated_at' => new \MongoDB\BSON\UTCDateTime(),
         ];
 
         if ($isGroup) {
             $update['client_ids'] = array_map(fn($c) => $c['_id'], $clientObjects);
-            $update['client_id'] = null;
+            $update['client_id']  = null;
         } else {
-            $update['client_id'] = $clientObjects[0]['_id'];
+            $update['client_id']  = $clientObjects[0]['_id'];
             $update['client_ids'] = [];
         }
 
@@ -208,39 +223,19 @@ class NutritionController
 
     private function format(object $doc, bool $full = false): array
     {
-        $clientIds = [];
-        if (!empty($doc['client_ids'])) {
-            foreach ($doc['client_ids'] as $cid) {
-                $clientIds[] = (string) $cid;
-            }
-        }
-
-        $assignedClient = null;
-        if (!empty($doc['client_id'])) {
-            $client = Database::collection('clients')->findOne(
-                ['_id' => $doc['client_id']],
-                ['projection' => ['name' => 1, 'profile_photo_url' => 1]]
-            );
-            if ($client) {
-                $assignedClient = [
-                    'id'                => (string) $client['_id'],
-                    'name'              => $client['name'],
-                    'profile_photo_url' => $client['profile_photo_url'] ?? null,
-                ];
-            }
-        }
-
         $data = [
-            'id'              => (string) $doc['_id'],
-            'plan_type'       => (string) ($doc['plan_type'] ?? 'individual'),
-            'client_id'       => isset($doc['client_id']) ? (string) $doc['client_id'] : null,
-            'client_ids'      => $clientIds,
-            'assigned_client' => $assignedClient,
-            'title'           => $doc['title'],
-            'week_start'      => $doc['week_start'] ? date('Y-m-d', (int)((string)$doc['week_start']) / 1000) : null,
-            'daily_totals'    => $doc['daily_totals'] ?? [],
-            'notes'           => $doc['notes'] ?? null,
-            'created_at'      => (string) ($doc['created_at'] ?? ''),
+            'id'           => (string) $doc['_id'],
+            'client_id'    => !empty($doc['client_id']) ? (string) $doc['client_id'] : null,
+            'client_ids'   => array_map(fn($id) => (string) $id, (array) ($doc['client_ids'] ?? [])),
+            'plan_type'    => $doc['plan_type'] ?? 'individual',
+            'group_name'   => $doc['group_name'] ?? null,
+            'title'        => $doc['title'],
+            'week_start'   => $doc['week_start'] ? date('Y-m-d', (int)(((string)$doc['week_start']) / 1000)) : null,
+            'daily_totals' => $doc['daily_totals'] ?? [],
+            'status'       => $doc['status'] ?? 'draft',
+            'notes'        => $doc['notes'] ?? null,
+            'created_at'   => (string) ($doc['created_at'] ?? ''),
+            'updated_at'   => (string) ($doc['updated_at'] ?? ''),
         ];
         if ($full) $data['days'] = $doc['days'] ?? [];
         return $data;

@@ -75,39 +75,14 @@ class AuthController
         $refreshToken = JwtService::generateRefreshToken($payload);
         $this->setTokenCookies($accessToken, $refreshToken);
 
-        $subscriptionStatus = $coach['subscription_status'] ?? 'none';
-        $subscriptionAlert = null;
-        if (in_array($subscriptionStatus, ['pending', 'none'], true)) {
-            $subscriptionAlert = 'select_plan';
-        } elseif ($subscriptionStatus === 'past_due') {
-            $subscriptionAlert = 'update_payment';
-        } elseif ($subscriptionStatus === 'cancelled') {
-            $subscriptionAlert = 'resubscribe';
-        } elseif (($coach['cancel_at_period_end'] ?? false) === true) {
-            $subscriptionAlert = 'renew_subscription';
-        }
-
-        $setupToken = null;
-        if ($subscriptionStatus === 'pending') {
-            $setupToken = JwtService::generateSetupToken((string) $coach['_id']);
-        }
-
         Response::success([
             'access_token'  => $accessToken,
             'refresh_token' => $refreshToken,
-            'setup_token'   => $setupToken,
             'coach'         => [
-                'id'                  => (string) $coach['_id'],
-                'name'                => $coach['name'],
-                'surname'             => $coach['surname'] ?? null,
-                'email'               => $coach['email'],
-                'language'            => $coach['language'] ?? 'en',
-                'profile_photo'       => $coach['profile_photo'] ?? null,
-                'phone'               => $coach['phone'] ?? null,
-                'bio'                 => $coach['bio'] ?? null,
-                'subscription_status' => $subscriptionStatus,
-                'subscription_alert'  => $subscriptionAlert,
-                'cancel_at_period_end'=> $coach['cancel_at_period_end'] ?? false,
+                'id'       => (string) $coach['_id'],
+                'name'     => $coach['name'],
+                'email'    => $coach['email'],
+                'language' => $coach['language'] ?? 'en',
             ]
         ], 'Login successful');
     }
@@ -136,7 +111,7 @@ class AuthController
             'password_hash'     => password_hash($body['password'], PASSWORD_BCRYPT, ['cost' => 12]),
             'language'          => $body['language'] ?? 'en',
             'client_count'      => 0,
-            'subscription_tier'   => 'none',
+            'subscription_tier'   => 'free',
             'subscription_status' => 'pending',
             'created_at'        => new \MongoDB\BSON\UTCDateTime(),
             'updated_at'        => new \MongoDB\BSON\UTCDateTime(),

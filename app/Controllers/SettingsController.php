@@ -5,15 +5,71 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Helpers\{Request, Response};
-use App\Services\{StripeService, BillingService};
+use App\Services\EmailService;
 use MongoDB\BSON\ObjectId;
-use MongoDB\BSON\UTCDateTime;
 
 class SettingsController
 {
-    // ─── Notifications ──────────────────────────────────────────────────────────
+    // ── Integrations ─────────────────────────────────────────────────────────
 
-    public function getNotifications(array $params): void
+    // GET /integrations/settings
+    public function getIntegrations(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $coach   = Database::collection('coaches')->findOne(
+            ['_id' => $coachId],
+            ['projection' => ['integrations' => 1]]
+        );
+
+        $integrations = $coach['integrations'] ?? [];
+
+        Response::success([
+            'webhook_url' => $integrations['webhook_url'] ?? null,
+            'api_key'     => $integrations['api_key'] ?? null,
+        ]);
+    }
+
+    // PUT /integrations/settings
+    public function updateIntegrations(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $body    = Request::body();
+
+        $set = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
+
+        if (array_key_exists('webhook_url', $body)) {
+            $webhookUrl = trim((string) ($body['webhook_url'] ?? ''));
+            if ($webhookUrl !== '' && !filter_var($webhookUrl, FILTER_VALIDATE_URL)) {
+                Response::error('Invalid webhook URL', 422);
+            }
+            $set['integrations.webhook_url'] = $webhookUrl ?: null;
+        }
+
+        if (!empty($body['generate_api_key'])) {
+            $set['integrations.api_key'] = bin2hex(random_bytes(32));
+        }
+
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => $set]
+        );
+
+        // Return updated values
+        $coach = Database::collection('coaches')->findOne(
+            ['_id' => $coachId],
+            ['projection' => ['integrations' => 1]]
+        );
+
+        Response::success([
+            'webhook_url' => $coach['integrations']['webhook_url'] ?? null,
+            'api_key'     => $coach['integrations']['api_key'] ?? null,
+        ], 'Integration settings updated');
+    }
+
+    // ── Notification Settings ────────────────────────────────────────────────
+
+    // GET /notification-settings
+    public function getNotificationSettings(array $params): void
     {
         $coachId = new ObjectId($params['_auth']['sub']);
         $coach   = Database::collection('coaches')->findOne(
@@ -23,458 +79,105 @@ class SettingsController
 
         $defaults = [
             'email_sms'      => true,
-            'appointments'   => false,
-            'consultation'   => false,
+            'appointments'   => true,
+            'consultation'   => true,
             'test_result'    => true,
             'login_alerts'   => true,
-            'dnd_enabled'    => true,
+            'dnd_enabled'    => false,
             'dnd_from'       => '22:00',
-            'dnd_to'         => '07:00',
+            'dnd_to'         => '08:00',
         ];
 
-        $settings = array_merge($defaults, (array) ($coach['notification_settings'] ?? []));
-        Response::success($settings);
+        $stored = $coach['notification_settings'] ?? [];
+
+        Response::success(array_merge($defaults, (array) $stored));
     }
 
-    public function updateNotifications(array $params): void
+    // PUT /notification-settings
+    public function updateNotificationSettings(array $params): void
     {
         $coachId = new ObjectId($params['_auth']['sub']);
         $body    = Request::body();
 
-        $allowed = [
-            'email_sms', 'appointments', 'consultation',
-            'test_result', 'login_alerts',
-            'dnd_enabled', 'dnd_from', 'dnd_to',
-        ];
-        $update = array_filter($body, fn($k) => in_array($k, $allowed), ARRAY_FILTER_USE_KEY);
+        $allowed = ['email_sms', 'appointments', 'consultation', 'test_result', 'login_alerts', 'dnd_enabled', 'dnd_from', 'dnd_to'];
+        $set     = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
 
-        Database::collection('coaches')->updateOne(
-            ['_id' => $coachId],
-            ['$set' => [
-                'notification_settings' => $update,
-                'updated_at'          => new UTCDateTime(),
-            ]]
-        );
-
-        Response::success($update, 'Notification settings updated');
-    }
-
-    // ─── Billing Address ────────────────────────────────────────────────────────
-
-    public function getBilling(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $coach   = Database::collection('coaches')->findOne(
-            ['_id' => $coachId],
-            ['projection' => [
-                'billing_address' => 1,
-                'billing_email'   => 1,
-                'payment_methods' => 1,
-                'stripe_customer_id' => 1,
-                'subscription_tier'  => 1,
-            ]]
-        );
-
-        $billing = new BillingService();
-        $country = $billing->detectCountry($coach['billing_address'] ?? null);
-        $pricing = $billing->calculatePrice($country);
-
-        $upcomingInvoice = null;
-        if (!empty($coach['stripe_customer_id']) && ($coach['subscription_tier'] ?? 'free') !== 'free') {
-            try {
-                $stripe  = new StripeService();
-                $invoice = $stripe->getUpcomingInvoice($coach['stripe_customer_id']);
-                $upcomingInvoice = [
-                    'amount_due' => $invoice['amount_due'] ?? null,
-                    'currency'   => $invoice['currency'] ?? 'eur',
-                    'period_start' => $invoice['period_start'] ?? null,
-                    'period_end'   => $invoice['period_end'] ?? null,
-                ];
-            } catch (\Throwable $e) {
-                error_log('Failed to fetch upcoming invoice in billing: ' . $e->getMessage());
+        foreach ($allowed as $field) {
+            if (array_key_exists($field, $body)) {
+                $value = $body[$field];
+                // Booleans
+                if (in_array($field, ['email_sms', 'appointments', 'consultation', 'test_result', 'login_alerts', 'dnd_enabled'])) {
+                    $value = (bool) $value;
+                }
+                // Time strings HH:MM
+                if (in_array($field, ['dnd_from', 'dnd_to'])) {
+                    $value = (string) $value;
+                    if (!preg_match('/^\d{2}:\d{2}$/', $value)) {
+                        Response::error("Invalid time format for {$field}. Use HH:MM", 422);
+                    }
+                }
+                $set["notification_settings.{$field}"] = $value;
             }
         }
 
-        Response::success([
-            'billing_address' => $coach['billing_address'] ?? [
-                'street'  => '',
-                'city'    => '',
-                'state'   => '',
-                'zip'     => '',
-                'country' => 'Australia',
-            ],
-            'billing_email'   => $coach['billing_email'] ?? ($coach['email'] ?? ''),
-            'payment_methods' => $coach['payment_methods'] ?? [],
-            'tax_info'        => [
-                'base_price' => $pricing['base'],
-                'vat_rate'   => $pricing['vat_rate'],
-                'vat_amount' => $pricing['vat_amount'],
-                'total'      => $pricing['total'],
-                'currency'   => $pricing['currency'],
-                'country'    => $pricing['country'],
-            ],
-            'upcoming_invoice' => $upcomingInvoice,
-        ]);
-    }
-
-    public function updateBilling(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $body    = Request::body();
-
-        $update = [];
-        if (isset($body['billing_address'])) {
-            $update['billing_address'] = array_intersect_key(
-                $body['billing_address'],
-                array_flip(['street', 'city', 'state', 'zip', 'country'])
-            );
-        }
-        if (isset($body['billing_email'])) {
-            $update['billing_email'] = filter_var($body['billing_email'], FILTER_VALIDATE_EMAIL) ?: '';
-        }
-
-        if (empty($update)) {
-            Response::error('No valid fields provided', 422);
-        }
-
-        $update['updated_at'] = new UTCDateTime();
-        Database::collection('coaches')->updateOne(['_id' => $coachId], ['$set' => $update]);
-
-        Response::success(null, 'Billing details updated');
-    }
-
-    public function createSetupIntent(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        if (!$coach) Response::error('Coach not found', 404);
-
-        try {
-            $stripe = new StripeService();
-        } catch (\RuntimeException $e) {
-            Response::error('Payment processing is not configured. Please contact support.', 503);
-        }
-
-        $customerId = $coach['stripe_customer_id'] ?? null;
-        if (!$customerId) {
-            $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
-            $customerId = $customer['id'];
-            Database::collection('coaches')->updateOne(
-                ['_id' => $coachId],
-                ['$set' => ['stripe_customer_id' => $customerId]]
-            );
-        }
-
-        $intent = $stripe->createSetupIntent($customerId);
-
-        Response::success([
-            'client_secret' => $intent['client_secret'],
-            'setup_intent_id' => $intent['id'],
-        ], 'SetupIntent created');
-    }
-
-    public function listPaymentMethods(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        if (!$coach) Response::error('Coach not found', 404);
-
-        $methods = array_map(fn($pm) => [
-            'id'         => $pm['id'],
-            'brand'      => $pm['brand'] ?? 'unknown',
-            'last4'      => $pm['last4'] ?? '',
-            'exp_month'  => $pm['exp_month'] ?? null,
-            'exp_year'   => $pm['exp_year'] ?? null,
-            'is_default' => ($coach['stripe_default_payment_method'] ?? '') === $pm['id'],
-        ], (array) ($coach['payment_methods'] ?? []));
-
-        Response::success(['payment_methods' => $methods]);
-    }
-
-    public function addPaymentMethod(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $body    = Request::body();
-        $errors  = Request::validate($body, ['payment_method_id' => 'required']);
-        if ($errors) Response::error('Validation failed', 422, $errors);
-
-        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        if (!$coach) Response::error('Coach not found', 404);
-
-        $customerId = $coach['stripe_customer_id'] ?? null;
-        if (!$customerId) {
-            Response::error('No Stripe customer. Create a subscription first.', 400);
-        }
-
-        try {
-            $stripe = new StripeService();
-        } catch (\RuntimeException $e) {
-            Response::error('Payment processing is not configured. Please contact support.', 503);
-        }
-
-        $paymentMethodId = $body['payment_method_id'];
-
-        try {
-            $pm = $stripe->attachPaymentMethod($customerId, $paymentMethodId);
-            $card = $pm['card'] ?? [];
-            $methodDoc = [
-                'id'        => $pm['id'],
-                'brand'     => $card['brand'] ?? 'unknown',
-                'last4'     => $card['last4'] ?? '',
-                'exp_month' => $card['exp_month'] ?? null,
-                'exp_year'  => $card['exp_year'] ?? null,
-            ];
-
-            $set = ['updated_at' => new UTCDateTime()];
-            $push = ['payment_methods' => $methodDoc];
-
-            if (!empty($body['is_default'])) {
-                $stripe->setDefaultPaymentMethod($customerId, $paymentMethodId);
-                $set['stripe_default_payment_method'] = $paymentMethodId;
-            }
-
-            Database::collection('coaches')->updateOne(
-                ['_id' => $coachId],
-                array_merge(
-                    ['$push' => $push],
-                    $set ? ['$set' => $set] : []
-                )
-            );
-        } catch (\RuntimeException $e) {
-            Response::error('Failed to attach payment method: ' . $e->getMessage(), 500);
-        }
-
-        Response::success(['payment_method_id' => $paymentMethodId], 'Payment method attached');
-    }
-
-    public function deletePaymentMethod(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $id      = $params['id'] ?? '';
-
-        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        if (!$coach) Response::error('Coach not found', 404);
-
-        try {
-            $stripe = new StripeService();
-            $stripe->detachPaymentMethod($id);
-        } catch (\RuntimeException $e) {
-            error_log('Stripe detach failed: ' . $e->getMessage());
-        }
-
         Database::collection('coaches')->updateOne(
             ['_id' => $coachId],
-            ['$pull' => ['payment_methods' => ['id' => $id]], '$set' => ['updated_at' => new UTCDateTime()]]
+            ['$set' => $set]
         );
 
-        Response::success(null, 'Payment method removed');
+        Response::success(null, 'Notification settings updated');
     }
 
-    public function setDefaultPaymentMethod(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $id      = $params['id'] ?? '';
+    // ── Support Contact ──────────────────────────────────────────────────────
 
-        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        if (!$coach) Response::error('Coach not found', 404);
-
-        $customerId = $coach['stripe_customer_id'] ?? null;
-        if ($customerId) {
-            try {
-                $stripe = new StripeService();
-                $stripe->setDefaultPaymentMethod($customerId, $id);
-            } catch (\RuntimeException $e) {
-                Response::error('Failed to set default payment method: ' . $e->getMessage(), 500);
-            }
-        }
-
-        $methods = $coach['payment_methods'] ?? [];
-        foreach ($methods as &$m) {
-            $m['is_default'] = ($m['id'] === $id);
-        }
-
-        Database::collection('coaches')->updateOne(
-            ['_id' => $coachId],
-            ['$set' => [
-                'payment_methods' => $methods,
-                'stripe_default_payment_method' => $id,
-                'updated_at' => new UTCDateTime(),
-            ]]
-        );
-
-        Response::success(null, 'Default payment method updated');
-    }
-
-    // ─── Team Members ───────────────────────────────────────────────────────────
-
-    public function getTeam(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $coach   = Database::collection('coaches')->findOne(
-            ['_id' => $coachId],
-            ['projection' => ['team_members' => 1]]
-        );
-
-        $members = $coach['team_members'] ?? [
-            ['id' => '1', 'name' => 'Zaza Gonzales', 'role' => 'Assistant', 'access' => 'Full Access', 'avatar' => 'ZG'],
-            ['id' => '2', 'name' => 'Grace White', 'role' => 'Nurse', 'access' => 'View Only', 'avatar' => 'GW'],
-            ['id' => '3', 'name' => 'Freddy Ulric', 'role' => 'Nurse', 'access' => 'View Only', 'avatar' => 'FU'],
-            ['id' => '4', 'name' => 'Sarah Chen', 'role' => 'Therapist', 'access' => 'Edit', 'avatar' => 'SC'],
-        ];
-
-        Response::success($members);
-    }
-
-    public function addTeamMember(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $body    = Request::body();
-        $errors  = Request::validate($body, ['name' => 'required', 'role' => 'required']);
-        if ($errors) Response::error('Validation failed', 422, $errors);
-
-        $member = [
-            'id'     => bin2hex(random_bytes(8)),
-            'name'   => $body['name'],
-            'role'   => $body['role'],
-            'access' => $body['access'] ?? 'View Only',
-            'avatar' => implode('', array_map(fn($n) => $n[0], explode(' ', $body['name']))),
-        ];
-
-        Database::collection('coaches')->updateOne(
-            ['_id' => $coachId],
-            ['$push' => ['team_members' => $member], '$set' => ['updated_at' => new UTCDateTime()]]
-        );
-
-        Response::success($member, 'Team member added');
-    }
-
-    public function updateTeamMember(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $id      = $params['id'] ?? '';
-        $body    = Request::body();
-
-        $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        if (!$coach) Response::error('Coach not found', 404);
-
-        $members = $coach['team_members'] ?? [];
-        $found   = false;
-        foreach ($members as &$m) {
-            if ($m['id'] === $id) {
-                if (isset($body['access'])) $m['access'] = $body['access'];
-                if (isset($body['role']))   $m['role']   = $body['role'];
-                $found = true;
-                break;
-            }
-        }
-
-        if (!$found) Response::error('Team member not found', 404);
-
-        Database::collection('coaches')->updateOne(
-            ['_id' => $coachId],
-            ['$set' => ['team_members' => $members, 'updated_at' => new UTCDateTime()]]
-        );
-
-        Response::success(null, 'Team member updated');
-    }
-
-    public function removeTeamMember(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $id      = $params['id'] ?? '';
-
-        Database::collection('coaches')->updateOne(
-            ['_id' => $coachId],
-            ['$pull' => ['team_members' => ['id' => $id]], '$set' => ['updated_at' => new UTCDateTime()]]
-        );
-
-        Response::success(null, 'Team member removed');
-    }
-
-    // ─── Integrations ───────────────────────────────────────────────────────────
-
-    public function getIntegrations(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $coach   = Database::collection('coaches')->findOne(
-            ['_id' => $coachId],
-            ['projection' => ['integration_settings' => 1, 'subscription_tier' => 1]]
-        );
-
-        $settings = $coach['integration_settings'] ?? [];
-        Response::success([
-            'webhook_url' => $settings['webhook_url'] ?? '',
-            'api_key'     => $settings['api_key'] ?? '',
-            'tier'        => $coach['subscription_tier'] ?? 'none',
-        ]);
-    }
-
-    public function updateIntegrations(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $body    = Request::body();
-
-        $update = [];
-        if (isset($body['webhook_url'])) {
-            $url = trim((string) $body['webhook_url']);
-            if (!empty($url) && !filter_var($url, FILTER_VALIDATE_URL)) {
-                Response::error('Invalid webhook URL', 422);
-            }
-            $update['webhook_url'] = $url;
-        }
-        if (!empty($body['generate_api_key'])) {
-            $update['api_key'] = bin2hex(random_bytes(32));
-        }
-
-        if (empty($update)) {
-            Response::error('No valid fields provided', 422);
-        }
-
-        Database::collection('coaches')->updateOne(
-            ['_id' => $coachId],
-            ['$set' => [
-                'integration_settings' => array_merge(
-                    (array) (Database::collection('coaches')->findOne(['_id' => $coachId], ['projection' => ['integration_settings' => 1]])['integration_settings'] ?? []),
-                    $update
-                ),
-                'updated_at' => new UTCDateTime(),
-            ]]
-        );
-
-        Response::success($update, 'Integration settings updated');
-    }
-
-    // ─── Support Contact ────────────────────────────────────────────────────────
-
+    // POST /support/contact
     public function createSupportTicket(array $params): void
     {
         $coachId = new ObjectId($params['_auth']['sub']);
         $body    = Request::body();
-        $errors  = Request::validate($body, ['subject' => 'required|min:2', 'message' => 'required|min:5']);
+        $errors  = Request::validate($body, [
+            'subject' => 'required',
+            'message' => 'required',
+        ]);
         if ($errors) Response::error('Validation failed', 422, $errors);
 
         $coach = Database::collection('coaches')->findOne(
             ['_id' => $coachId],
-            ['projection' => ['name' => 1, 'email' => 1, 'subscription_tier' => 1]]
+            ['projection' => ['name' => 1, 'email' => 1]]
         );
 
-        $isPriority = in_array($coach['subscription_tier'] ?? '', ['business'], true);
+        if (!$coach) Response::error('Coach not found', 404);
 
-        $ticket = [
-            'coach_id'     => $coachId,
-            'coach_name'   => $coach['name'] ?? 'Unknown',
-            'coach_email'  => $coach['email'] ?? '',
-            'subject'      => trim($body['subject']),
-            'message'      => trim($body['message']),
-            'priority'     => $isPriority ? 'high' : 'normal',
-            'tier'         => $coach['subscription_tier'] ?? 'none',
-            'status'       => 'open',
-            'created_at'   => new UTCDateTime(),
-            'updated_at'   => new UTCDateTime(),
-        ];
+        $subject = htmlspecialchars(trim($body['subject']), ENT_QUOTES, 'UTF-8');
+        $message = htmlspecialchars(trim($body['message']), ENT_QUOTES, 'UTF-8');
+        $name    = htmlspecialchars((string) ($coach['name'] ?? 'Unknown'), ENT_QUOTES, 'UTF-8');
+        $email   = (string) ($coach['email'] ?? '');
 
-        Database::collection('support_tickets')->insertOne($ticket);
+        // Store ticket in database
+        Database::collection('support_tickets')->insertOne([
+            'coach_id'   => $coachId,
+            'coach_email'=> $email,
+            'subject'    => $body['subject'],
+            'message'    => $body['message'],
+            'status'     => 'open',
+            'created_at' => new \MongoDB\BSON\UTCDateTime(),
+        ]);
 
-        Response::success(null, $isPriority ? 'Priority support ticket created' : 'Support ticket created');
+        // Send email to support if configured
+        $supportEmail = $_ENV['SUPPORT_EMAIL'] ?? $_ENV['MAIL_FROM'] ?? null;
+        if ($supportEmail) {
+            $html = <<<HTML
+            <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+              <h2>New Support Ticket</h2>
+              <p><strong>From:</strong> {$name} ({$email})</p>
+              <p><strong>Subject:</strong> {$subject}</p>
+              <hr>
+              <p>{$message}</p>
+            </div>
+            HTML;
+            EmailService::send($supportEmail, "Support Ticket: {$subject}", $html);
+        }
+
+        Response::success(null, 'Support ticket submitted. We will get back to you soon.', 201);
     }
 }

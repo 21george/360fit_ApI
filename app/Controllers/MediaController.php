@@ -144,7 +144,7 @@ class MediaController
                 's3_key'      => $key,
                 'url'         => $url,
                 'log_id'      => isset($m['log_id']) ? (string) $m['log_id'] : null,
-                'uploaded_at' => $m['uploaded_at'] ? date('c', (int)((int)((string)$m['uploaded_at']) / 1000)) : null,
+                'uploaded_at' => $m['uploaded_at'] ? date('c', (int)(((string)$m['uploaded_at']) / 1000)) : null,
             ];
         }, $media);
 
@@ -173,7 +173,7 @@ class MediaController
                 'id'          => (string) $m['_id'],
                 'type'        => $m['type'],
                 'url'         => $url,
-                'uploaded_at' => $m['uploaded_at'] ? date('c', (int)((int)((string)$m['uploaded_at']) / 1000)) : null,
+                'uploaded_at' => $m['uploaded_at'] ? date('c', (int)(((string)$m['uploaded_at']) / 1000)) : null,
             ];
         }, $media);
 

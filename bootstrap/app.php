@@ -56,32 +56,29 @@ set_error_handler(function ($severity, $message, $file, $line) {
 });
 
 set_exception_handler(function (Throwable $e) {
-    if ($e instanceof \App\Exceptions\ResponseHaltException) {
-        http_response_code($e->httpCode);
-        echo json_encode($e->data, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
-        exit;
-    }
-
-    $context = [
-        'exception' => get_class($e),
-        'message' => $e->getMessage(),
-        'file' => $e->getFile(),
-        'line' => $e->getLine(),
-        'trace' => $e->getTraceAsString(),
-        'request_id' => $_SERVER['REQUEST_ID'] ?? null,
-    ];
-
-    \App\Services\Logger::error('Uncaught exception', $context);
-
-    // Also keep stderr output for development
-    $errorMsg = sprintf("%s [%s:%d] %s", $context['exception'], $context['file'], $context['line'], $context['message']);
+    $errorMsg = sprintf(
+        "%s [%s:%d] %s",
+        get_class($e),
+        $e->getFile(),
+        $e->getLine(),
+        $e->getMessage()
+    );
     error_log($errorMsg);
-
+    if (php_sapi_name() !== 'cli-server') {
+        error_log('Stack trace: ' . $e->getTraceAsString());
+    }
+    
+    // Log to file for debugging
+    $logFile = BASE_PATH . '/storage/logs/error.log';
+    if (is_writable(dirname($logFile))) {
+        file_put_contents($logFile, date('Y-m-d H:i:s') . ' - ' . $errorMsg . PHP_EOL, FILE_APPEND);
+    }
+    
     Response::json(['error' => 'Internal server error'], 500);
 });
 
 // Route
 $router = new Router();
 $router->setPrefix('/v1');
-require_once BASE_PATH . '/routes/api.php';
+require BASE_PATH . '/routes/api.php';
 $router->dispatch();

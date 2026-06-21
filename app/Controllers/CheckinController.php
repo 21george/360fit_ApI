@@ -39,10 +39,6 @@ class CheckinController
         ]);
         if ($errors) Response::error('Validation failed', 422, $errors);
 
-        if (!in_array($body['type'], ['call', 'video', 'chat'], true)) {
-            Response::error('Invalid type. Must be call, video, or chat', 422);
-        }
-
         $clientId = new ObjectId($body['client_id']);
         $client   = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
         if (!$client) Response::error('Client not found', 404);
@@ -63,16 +59,14 @@ class CheckinController
             'updated_at'   => new \MongoDB\BSON\UTCDateTime(),
         ]);
 
-        // Notify client (persistent + push)
-        $triggerService = new NotificationTriggerService();
-        $triggerService->notifyClientNewCheckin(
-            (string) $clientId,
-            $body['scheduled_at'],
-            $body['type'],
-            (string) $result->getInsertedId()
-        );
+        // Notify client
+        if (!empty($client['fcm_token'])) {
+            $datetime = date('D M j, g:i A', strtotime($body['scheduled_at']));
+            FcmService::notifyCheckin($client['fcm_token'], $datetime);
+        }
 
         // Schedule 2-hour reminder for coach
+        $triggerService = new NotificationTriggerService();
         $triggerService->scheduleCheckinReminder(
             (string) $result->getInsertedId(),
             (string) $clientId,
@@ -115,20 +109,6 @@ class CheckinController
 
         if (!empty($set)) {
             Database::collection('checkin_meetings')->updateOne(['_id' => $mtgId], ['$set' => $set]);
-        }
-
-        // Notify client if meeting time changed
-        if (isset($set['scheduled_at'])) {
-            $client = Database::collection('clients')->findOne(['_id' => $meeting['client_id']]);
-            if ($client) {
-                $triggerService = new NotificationTriggerService();
-                $triggerService->notifyClientNewCheckin(
-                    (string) $meeting['client_id'],
-                    $body['scheduled_at'],
-                    $body['type'] ?? $meeting['type'],
-                    (string) $mtgId
-                );
-            }
         }
 
         Response::success(null, 'Meeting updated');
@@ -187,19 +167,6 @@ class CheckinController
             ]]
         );
 
-        // Notify coach of client's response
-        $client = Database::collection('clients')->findOne(['_id' => $clientId]);
-        if ($client) {
-            $triggerService = new NotificationTriggerService();
-            $triggerService->notifyCoachCheckinResponse(
-                (string) $clientId,
-                $client['name'] ?? 'A client',
-                $response,
-                (string) $meetingId,
-                $this->formatNullableDate($meeting['scheduled_at'] ?? null) ?? ''
-            );
-        }
-
         $updatedMeeting = Database::collection('checkin_meetings')->findOne(['_id' => $meetingId]);
         if (!$updatedMeeting) Response::error('Meeting not found', 404);
 
@@ -239,19 +206,6 @@ class CheckinController
             ]]
         );
 
-        // Notify coach of reschedule request
-        $client = Database::collection('clients')->findOne(['_id' => $clientId]);
-        if ($client) {
-            $triggerService = new NotificationTriggerService();
-            $triggerService->notifyCoachCheckinReschedule(
-                (string) $clientId,
-                $client['name'] ?? 'A client',
-                (string) $meetingId,
-                $body['proposed_scheduled_at'],
-                $body['note'] ?? null
-            );
-        }
-
         $updatedMeeting = Database::collection('checkin_meetings')->findOne(['_id' => $meetingId]);
         if (!$updatedMeeting) Response::error('Meeting not found', 404);
 
@@ -283,7 +237,7 @@ class CheckinController
         return [
             'id'           => isset($data['_id']) ? (string) $data['_id'] : '',
             'client_id'    => isset($data['client_id']) ? (string) $data['client_id'] : '',
-            'scheduled_at' => $this->formatNullableDate($scheduledAt),
+            'scheduled_at' => $scheduledAt ? date('c', (int) (((string) $scheduledAt) / 1000)) : null,
             'type'         => $data['type'] ?? 'chat',
             'meeting_link' => $data['meeting_link'] ?? null,
             'notes'        => $data['notes'] ?? null,

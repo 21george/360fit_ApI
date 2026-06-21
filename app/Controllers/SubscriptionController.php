@@ -11,10 +11,9 @@ use MongoDB\BSON\ObjectId;
 class SubscriptionController
 {
     private const TIER_LIMITS = [
-        'none'     => null,
-        'free'     => null,
-        'pro'      => null,
-        'business' => null,
+        'free'     => 3,
+        'pro'      => 25,
+        'business' => 999999,
     ];
 
     /**
@@ -31,26 +30,19 @@ class SubscriptionController
         $tier   = $coach['subscription_tier'] ?? 'free';
         $status = $coach['subscription_status'] ?? 'none';
         $limit  = self::TIER_LIMITS[$tier] ?? self::TIER_LIMITS['free'];
-        $period = $coach['subscription_period'] ?? 'monthly';
 
         $clientCount = Database::collection('clients')->countDocuments([
             'coach_id' => $coachId,
             'active'   => true,
         ]);
 
-        $trialEndsAt = isset($coach['trial_ends_at']) ? (string) $coach['trial_ends_at'] : null;
-        $periodEnd   = isset($coach['subscription_period_end']) ? (string) $coach['subscription_period_end'] : null;
-        $nextPaymentDate = ($status === 'trialing' && $trialEndsAt) ? $trialEndsAt : $periodEnd;
-
         Response::success([
             'tier'             => $tier,
             'status'           => $status,
-            'period'           => $period,
             'client_limit'     => $limit,
             'client_count'     => $clientCount,
-            'trial_ends_at'    => $trialEndsAt,
-            'current_period_end' => $periodEnd,
-            'next_payment_date' => $nextPaymentDate,
+            'trial_ends_at'    => isset($coach['trial_ends_at']) ? (string) $coach['trial_ends_at'] : null,
+            'current_period_end' => isset($coach['subscription_period_end']) ? (string) $coach['subscription_period_end'] : null,
             'cancel_at_period_end' => $coach['cancel_at_period_end'] ?? false,
             'stripe_customer_id'   => $coach['stripe_customer_id'] ?? null,
         ]);
@@ -68,13 +60,8 @@ class SubscriptionController
         if ($errors) Response::error('Validation failed', 422, $errors);
 
         $tier = $body['plan_tier'];
-        if (!in_array($tier, ['pro', 'business'])) {
-            Response::error('Invalid tier. Choose pro or business', 422);
-        }
-
-        $period = $body['plan_period'] ?? 'monthly';
-        if (!in_array($period, ['monthly', 'quarterly', 'semi_annual', 'annual'])) {
-            $period = 'monthly';
+        if (!in_array($tier, ['free', 'pro', 'business'])) {
+            Response::error('Invalid tier. Choose free, pro, or business', 422);
         }
 
         $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
@@ -92,7 +79,6 @@ class SubscriptionController
                 ['$set' => [
                     'subscription_tier'   => 'free',
                     'subscription_status' => 'active',
-                    'subscription_period' => 'monthly',
                     'updated_at'          => new \MongoDB\BSON\UTCDateTime(),
                 ]]
             );
@@ -139,44 +125,50 @@ class SubscriptionController
         // For paid tiers: create Stripe customer and checkout session
         try {
             $stripe = new StripeService();
-            $priceId = $stripe->getPriceIdForTier($tier, $period);
-
-            if (empty($priceId)) {
-                Response::error('Stripe price not configured for this tier and period', 503);
+        } catch (\RuntimeException $e) {
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                Response::success([
+                    'checkout_url' => '/subscription/mock-checkout?tier=' . $tier,
+                    'tier'         => $tier,
+                ], 'Ready for checkout (dev mode)');
+                return;
             }
+            Response::error('Payment processing is not configured. Please contact support.', 503);
+        }
+        $period  = $body['plan_period'] ?? $body['period'] ?? 'monthly';
+        $priceId = $stripe->getPriceIdForTierAndPeriod($tier, $period);
 
-            // Create Stripe customer
-            $customerId = $coach['stripe_customer_id'] ?? null;
-            if (!$customerId) {
-                $customer = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
-                $customerId = $customer['id'];
-                Database::collection('coaches')->updateOne(
-                    ['_id' => $coachId],
-                    ['$set' => ['stripe_customer_id' => $customerId]]
-                );
-            }
+        if (empty($priceId)) {
+            Response::error('Stripe price not configured for this tier and period', 500);
+        }
 
-            // Store selected tier and period temporarily for webhook to use
+        // Create Stripe customer
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) {
+            $customer = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
+            $customerId = $customer['id'];
             Database::collection('coaches')->updateOne(
                 ['_id' => $coachId],
-                ['$set' => [
-                    'pending_subscription_tier'   => $tier,
-                    'pending_subscription_period' => $period,
-                    'updated_at'                  => new \MongoDB\BSON\UTCDateTime(),
-                ]]
+                ['$set' => ['stripe_customer_id' => $customerId]]
             );
-
-            // Create checkout session with signup-specific URLs
-            $session = $stripe->createSignupCheckoutSession($customerId, $priceId, (string) $coachId);
-
-            Response::success([
-                'checkout_url' => $session['url'],
-                'tier'         => $tier,
-                'period'       => $period,
-            ], 'Ready for checkout');
-        } catch (\RuntimeException $e) {
-            Response::error('Payment processing error: ' . $e->getMessage(), 503);
         }
+
+        // Store selected tier temporarily for webhook to use
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'pending_subscription_tier' => $tier,
+                'updated_at'                => new \MongoDB\BSON\UTCDateTime(),
+            ]]
+        );
+
+        // Create checkout session with signup-specific URLs
+        $session = $stripe->createSignupCheckoutSession($customerId, $priceId, (string) $coachId);
+
+        Response::success([
+            'checkout_url' => $session['url'],
+            'tier'         => $tier,
+        ], 'Ready for checkout');
     }
 
     /**
@@ -195,51 +187,47 @@ class SubscriptionController
             Response::error('Invalid tier. Choose pro or business', 422);
         }
 
-        $period = $body['period'] ?? 'monthly';
-        if (!in_array($period, ['monthly', 'quarterly', 'semi_annual', 'annual'])) {
-            $period = 'monthly';
-        }
-
         $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
         try {
             $stripe = new StripeService();
-            $priceId = $stripe->getPriceIdForTier($tier, $period);
-
-            if (empty($priceId)) {
-                Response::error('Stripe price not configured for this tier and period', 503);
-            }
-
-            // Create or reuse Stripe customer
-            $customerId = $coach['stripe_customer_id'] ?? null;
-            if (!$customerId) {
-                $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
-                $customerId = $customer['id'];
-                Database::collection('coaches')->updateOne(
-                    ['_id' => $coachId],
-                    ['$set' => ['stripe_customer_id' => $customerId]]
-                );
-            }
-
-            // Check if this is for signup flow (pending subscription) or upgrade flow
-            $isSignupFlow = ($coach['subscription_status'] ?? '') === 'pending';
-
-            if ($isSignupFlow) {
-                // Use signup-specific checkout with proper redirect URLs
-                $session = $stripe->createSignupCheckoutSession($customerId, $priceId, (string) $coachId);
-                Response::success(['checkout_url' => $session['url']], 'Checkout session created');
-            } else {
-                // Use embedded checkout for in-app upgrades
-                $session = $stripe->createEmbeddedCheckoutSession($customerId, $priceId, (string) $coachId);
-                Response::success([
-                    'client_secret' => $session['client_secret'],
-                    'session_id'    => $session['id'],
-                ], 'Checkout session created');
-            }
         } catch (\RuntimeException $e) {
-            Response::error('Payment processing error: ' . $e->getMessage(), 503);
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                Response::success(['checkout_url' => '/subscription/mock-checkout?tier=' . $tier], 'Checkout session created (dev mode)');
+                return;
+            }
+            Response::error('Payment processing is not configured. Please contact support.', 503);
         }
+        $period  = $body['period'] ?? 'monthly';
+        $priceId = $stripe->getPriceIdForTierAndPeriod($tier, $period);
+
+        if (empty($priceId)) {
+            Response::error('Stripe price not configured for this tier and period', 500);
+        }
+
+        // Create or reuse Stripe customer
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) {
+            $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
+            $customerId = $customer['id'];
+            Database::collection('coaches')->updateOne(
+                ['_id' => $coachId],
+                ['$set' => ['stripe_customer_id' => $customerId]]
+            );
+        }
+
+        // Check if this is for signup flow (pending subscription) or upgrade flow
+        $isSignupFlow = ($coach['subscription_status'] ?? '') === 'pending';
+
+        if ($isSignupFlow) {
+            // Use signup-specific checkout with proper redirect URLs
+            $session = $stripe->createSignupCheckoutSession($customerId, $priceId, (string) $coachId);
+        } else {
+            $session = $stripe->createCheckoutSession($customerId, $priceId, (string) $coachId);
+        }
+
+        Response::success(['checkout_url' => $session['url']], 'Checkout session created');
     }
 
     /**
@@ -252,25 +240,23 @@ class SubscriptionController
         $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) {
+            Response::error('No active subscription to manage', 400);
+        }
+
         try {
             $stripe  = new StripeService();
-
-            $customerId = $coach['stripe_customer_id'] ?? null;
-            if (!$customerId) {
-                $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
-                $customerId = $customer['id'];
-                Database::collection('coaches')->updateOne(
-                    ['_id' => $coachId],
-                    ['$set' => ['stripe_customer_id' => $customerId]]
-                );
-            }
-
-            $session = $stripe->createPortalSession($customerId);
-
-            Response::success(['portal_url' => $session['url']], 'Portal session created');
         } catch (\RuntimeException $e) {
-            Response::error('Payment processing error: ' . $e->getMessage(), 503);
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                Response::success(['portal_url' => '/subscription/mock-portal'], 'Portal session created (dev mode)');
+                return;
+            }
+            Response::error('Payment processing is not configured. Please contact support.', 503);
         }
+        $session = $stripe->createPortalSession($customerId);
+
+        Response::success(['portal_url' => $session['url']], 'Portal session created');
     }
 
     /**
@@ -290,157 +276,25 @@ class SubscriptionController
 
         try {
             $stripe = new StripeService();
-            $stripe->cancelSubscription($subId);
-
-            Database::collection('coaches')->updateOne(
-                ['_id' => $coachId],
-                ['$set' => ['cancel_at_period_end' => true, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
-            );
-
-            Response::success(null, 'Subscription will cancel at end of billing period');
         } catch (\RuntimeException $e) {
-            Response::error('Payment processing error: ' . $e->getMessage(), 503);
-        }
-    }
-
-    /**
-     * POST /subscription/upgrade
-     * Upgrade or downgrade an existing active subscription to a new tier.
-     * Uses Stripe subscription update with proration — no checkout redirect needed.
-     */
-    public function upgrade(array $params): void
-    {
-        $body    = Request::body();
-        $newTier = trim($body['tier'] ?? '');
-        $newPeriod = trim($body['period'] ?? 'monthly');
-
-        if (!in_array($newTier, ['pro', 'business'], true)) {
-            Response::error('Invalid tier. Use "pro" or "business".', 400);
-        }
-
-        if (!in_array($newPeriod, ['monthly', 'quarterly', 'semi_annual', 'annual'], true)) {
-            $newPeriod = 'monthly';
-        }
-
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        if (!$coach) {
-            Response::error('Coach not found', 404);
-        }
-
-        $currentTier   = $coach['subscription_tier']   ?? 'free';
-        $currentPeriod = $coach['subscription_period'] ?? 'monthly';
-        $currentStatus = $coach['subscription_status'] ?? 'none';
-        $subId         = $coach['stripe_subscription_id'] ?? null;
-
-        if ($currentTier === $newTier && $currentPeriod === $newPeriod) {
-            Response::error('You are already on this plan and billing period.', 400);
-        }
-
-        if (!in_array($currentStatus, ['active', 'trialing'], true) || !$subId) {
-            Response::error('No active subscription to upgrade. Please use checkout instead.', 400);
-        }
-
-        try {
-            $stripe   = new StripeService();
-            $priceId  = $stripe->getPriceIdForTier($newTier, $newPeriod);
-
-            if (empty($priceId)) {
-                Response::error("Price not configured for tier: {$newTier}, period: {$newPeriod}", 503);
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                Database::collection('coaches')->updateOne(
+                    ['_id' => $coachId],
+                    ['$set' => ['cancel_at_period_end' => true, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
+                );
+                Response::success(null, 'Subscription will cancel at end of billing period (dev mode)');
+                return;
             }
-
-            $stripe->updateSubscription($subId, $priceId);
-        } catch (\RuntimeException $e) {
-            Response::error('Failed to update subscription: ' . $e->getMessage(), 503);
+            Response::error('Payment processing is not configured. Please contact support.', 503);
         }
+        $stripe->cancelSubscription($subId);
 
         Database::collection('coaches')->updateOne(
             ['_id' => $coachId],
-            ['$set' => [
-                'subscription_tier'   => $newTier,
-                'subscription_period' => $newPeriod,
-                'updated_at'          => new \MongoDB\BSON\UTCDateTime(),
-            ]]
+            ['$set' => ['cancel_at_period_end' => true, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
         );
 
-        Response::success(['new_tier' => $newTier, 'new_period' => $newPeriod], 'Plan updated successfully');
-    }
-
-    /**
-     * GET /subscription/invoices
-     * Return a list of paid Stripe invoices for the authenticated coach.
-     */
-    public function invoices(array $params): void
-    {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        if (!$coach) Response::error('Coach not found', 404);
-
-        $customerId = $coach['stripe_customer_id'] ?? null;
-        if (!$customerId) {
-            Response::json(['data' => [], 'total' => 0]);
-            return;
-        }
-
-        try {
-            $stripe   = new StripeService();
-            $response = $stripe->listInvoices($customerId, 20);
-            $invoices = $response['data'] ?? [];
-
-            $formatted = array_map(fn($inv) => [
-                'id'                  => $inv['id'],
-                'number'              => $inv['number'] ?? ('INV-' . substr($inv['id'], -6)),
-                'amount'              => $inv['amount_paid'] / 100,
-                'currency'            => strtoupper($inv['currency']),
-                'status'              => $inv['status'],
-                'date'                => $inv['created'],
-                'pdf_url'             => $inv['invoice_pdf'] ?? null,
-                'hosted_invoice_url'  => $inv['hosted_invoice_url'] ?? null,
-                'description'         => $inv['lines']['data'][0]['description'] ?? null,
-                'last4'               => $inv['charge']['payment_method_details']['card']['last4'] ?? null,
-            ], $invoices);
-
-            Response::json(['data' => $formatted, 'total' => count($formatted)]);
-        } catch (\RuntimeException $e) {
-            Response::error('Payment processing is not configured.', 503);
-        }
-    }
-
-    /**
-     * GET /subscription/invoices/:id/download
-     * Return a download URL for a specific Stripe invoice.
-     */
-    public function downloadInvoice(array $params): void
-    {
-        $coachId   = new ObjectId($params['_auth']['sub']);
-        $invoiceId = $params['id'] ?? '';
-        if (!$invoiceId) {
-            Response::error('Invoice ID required', 400);
-        }
-
-        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
-        if (!$coach) Response::error('Coach not found', 404);
-
-        $customerId = $coach['stripe_customer_id'] ?? null;
-        if (!$customerId) {
-            Response::error('No billing account found', 400);
-        }
-
-        try {
-            $stripe = new StripeService();
-            $invoice = $stripe->retrieveInvoice($invoiceId);
-
-            if (($invoice['customer'] ?? '') !== $customerId) {
-                Response::error('Invoice not found', 404);
-            }
-
-            Response::success([
-                'download_url' => $invoice['invoice_pdf'] ?? null,
-                'hosted_invoice_url' => $invoice['hosted_invoice_url'] ?? null,
-            ]);
-        } catch (\RuntimeException $e) {
-            Response::error('Failed to retrieve invoice: ' . $e->getMessage(), 503);
-        }
+        Response::success(null, 'Subscription will cancel at end of billing period');
     }
 
     /**
@@ -497,37 +351,29 @@ class SubscriptionController
         $stripe = new StripeService();
         $sub    = $stripe->getSubscription($subscriptionId);
         $tier   = $this->tierFromPriceId($sub['items']['data'][0]['price']['id'] ?? '');
-        $period = $this->periodFromPriceId($sub['items']['data'][0]['price']['id'] ?? '');
 
         // Use pending_tier from metadata as fallback
         if ($pendingTier && in_array($pendingTier, ['pro', 'business'])) {
             $tier = $pendingTier;
         }
 
-        // Determine subscription status - convert 'incomplete' to 'active'/'trialing'
+        // Determine subscription status - convert 'pending' to 'active'/'trialing'
         $status = $sub['status'] ?? 'active';
         if ($status === 'incomplete') {
             $status = 'trialing'; // Stripe sets incomplete for trials before first payment
         }
 
-        $set = [
-            'stripe_customer_id'     => $customerId,
-            'stripe_subscription_id' => $subscriptionId,
-            'subscription_tier'      => $tier,
-            'subscription_status'    => $status,
-            'subscription_period'    => $period,
-            'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
-            'cancel_at_period_end'   => false,
-            'updated_at'             => new \MongoDB\BSON\UTCDateTime(),
-        ];
-
-        if (!empty($sub['trial_end'])) {
-            $set['trial_ends_at'] = new \MongoDB\BSON\UTCDateTime((int) $sub['trial_end'] * 1000);
-        }
-
         Database::collection('coaches')->updateOne(
             ['_id' => new ObjectId($coachId)],
-            ['$set' => $set]
+            ['$set' => [
+                'stripe_customer_id'     => $customerId,
+                'stripe_subscription_id' => $subscriptionId,
+                'subscription_tier'      => $tier,
+                'subscription_status'    => $status,
+                'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
+                'cancel_at_period_end'   => false,
+                'updated_at'             => new \MongoDB\BSON\UTCDateTime(),
+            ]]
         );
     }
 
@@ -537,24 +383,16 @@ class SubscriptionController
         if (!$coachId) return;
 
         $tier = $this->tierFromPriceId($sub['items']['data'][0]['price']['id'] ?? '');
-        $period = $this->periodFromPriceId($sub['items']['data'][0]['price']['id'] ?? '');
-
-        $set = [
-            'subscription_tier'       => $tier,
-            'subscription_period'     => $period,
-            'subscription_status'     => $sub['status'] ?? 'active',
-            'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
-            'cancel_at_period_end'    => $sub['cancel_at_period_end'] ?? false,
-            'updated_at'              => new \MongoDB\BSON\UTCDateTime(),
-        ];
-
-        if (!empty($sub['trial_end'])) {
-            $set['trial_ends_at'] = new \MongoDB\BSON\UTCDateTime((int) $sub['trial_end'] * 1000);
-        }
 
         Database::collection('coaches')->updateOne(
             ['_id' => new ObjectId($coachId)],
-            ['$set' => $set]
+            ['$set' => [
+                'subscription_tier'       => $tier,
+                'subscription_status'     => $sub['status'] ?? 'active',
+                'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
+                'cancel_at_period_end'    => $sub['cancel_at_period_end'] ?? false,
+                'updated_at'              => new \MongoDB\BSON\UTCDateTime(),
+            ]]
         );
     }
 
@@ -566,11 +404,10 @@ class SubscriptionController
         Database::collection('coaches')->updateOne(
             ['_id' => new ObjectId($coachId)],
             ['$set' => [
-                'subscription_tier'      => 'none',
-                'subscription_status'      => 'cancelled',
-                'subscription_period'      => 'monthly',
-                'cancel_at_period_end'     => false,
-                'updated_at'               => new \MongoDB\BSON\UTCDateTime(),
+                'subscription_tier'      => 'free',
+                'subscription_status'    => 'cancelled',
+                'cancel_at_period_end'   => false,
+                'updated_at'             => new \MongoDB\BSON\UTCDateTime(),
             ]]
         );
     }
@@ -591,58 +428,389 @@ class SubscriptionController
 
     private function tierFromPriceId(string $priceId): string
     {
-        $proIds = array_filter([
-            $_ENV['STRIPE_PRICE_PRO_MONTHLY']     ?? $_ENV['STRIPE_PRICE_PRO'] ?? '',
-            $_ENV['STRIPE_PRICE_PRO_QUARTERLY']    ?? '',
-            $_ENV['STRIPE_PRICE_PRO_SEMI_ANNUAL']  ?? '',
-            $_ENV['STRIPE_PRICE_PRO_ANNUAL']       ?? '',
-        ]);
-        $businessIds = array_filter([
-            $_ENV['STRIPE_PRICE_BUSINESS_MONTHLY']     ?? $_ENV['STRIPE_PRICE_BUSINESS'] ?? '',
-            $_ENV['STRIPE_PRICE_BUSINESS_QUARTERLY']    ?? '',
-            $_ENV['STRIPE_PRICE_BUSINESS_SEMI_ANNUAL']  ?? '',
-            $_ENV['STRIPE_PRICE_BUSINESS_ANNUAL']       ?? '',
-        ]);
+        $proPriceId      = $_ENV['STRIPE_PRICE_PRO'] ?? '';
+        $businessPriceId = $_ENV['STRIPE_PRICE_BUSINESS'] ?? '';
 
-        if (in_array($priceId, $proIds, true))      return 'pro';
-        if (in_array($priceId, $businessIds, true)) return 'business';
+        if ($priceId === $proPriceId)      return 'pro';
+        if ($priceId === $businessPriceId) return 'business';
         return 'pro'; // default fallback
     }
 
-    private function periodFromPriceId(string $priceId): string
+    /**
+     * Get the client limit for a given tier.
+     */
+    public static function getClientLimit(string $tier): int
     {
-        $map = [
-            'monthly'     => [
-                $_ENV['STRIPE_PRICE_PRO_MONTHLY']     ?? $_ENV['STRIPE_PRICE_PRO'] ?? '',
-                $_ENV['STRIPE_PRICE_BUSINESS_MONTHLY'] ?? $_ENV['STRIPE_PRICE_BUSINESS'] ?? '',
-            ],
-            'quarterly'   => [
-                $_ENV['STRIPE_PRICE_PRO_QUARTERLY']     ?? '',
-                $_ENV['STRIPE_PRICE_BUSINESS_QUARTERLY'] ?? '',
-            ],
-            'semi_annual' => [
-                $_ENV['STRIPE_PRICE_PRO_SEMI_ANNUAL']     ?? '',
-                $_ENV['STRIPE_PRICE_BUSINESS_SEMI_ANNUAL'] ?? '',
-            ],
-            'annual'      => [
-                $_ENV['STRIPE_PRICE_PRO_ANNUAL']     ?? '',
-                $_ENV['STRIPE_PRICE_BUSINESS_ANNUAL'] ?? '',
-            ],
-        ];
-
-        foreach ($map as $period => $priceIds) {
-            if (in_array($priceId, $priceIds, true)) {
-                return $period;
-            }
-        }
-        return 'monthly';
+        return self::TIER_LIMITS[$tier] ?? self::TIER_LIMITS['free'];
     }
 
     /**
-     * Get the client limit for a given tier (null = unlimited).
+     * GET /subscription/invoices
+     * List invoices for the authenticated coach from Stripe.
      */
-    public static function getClientLimit(string $tier): ?int
+    public function invoices(array $params): void
     {
-        return self::TIER_LIMITS[$tier] ?? self::TIER_LIMITS['free'];
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        // No Stripe key configured — return empty list, don't crash
+        if (!StripeService::isConfigured()) {
+            Response::success([]);
+            return;
+        }
+
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) {
+            Response::success([]);
+            return;
+        }
+
+        try {
+            $stripe   = new StripeService();
+            $response = $stripe->listInvoices($customerId);
+            $invoices = $response['data'] ?? [];
+
+            $formatted = array_map(fn($inv) => [
+                'id'              => $inv['id'],
+                'number'          => $inv['number'] ?? null,
+                'amount_paid'     => $inv['amount_paid'] ?? 0,
+                'currency'        => $inv['currency'] ?? 'usd',
+                'status'          => $inv['status'] ?? 'unknown',
+                'period_start'    => $inv['period_start'] ?? null,
+                'period_end'      => $inv['period_end'] ?? null,
+                'hosted_invoice_url' => $inv['hosted_invoice_url'] ?? null,
+                'invoice_pdf'     => $inv['invoice_pdf'] ?? null,
+                'created'         => $inv['created'] ?? null,
+            ], $invoices);
+
+            Response::success($formatted);
+        } catch (\RuntimeException $e) {
+            error_log('Stripe invoices error: ' . $e->getMessage());
+            Response::success([]);
+        }
+    }
+
+    /**
+     * GET /subscription/invoices/:id/download
+     * Get download URL for a specific invoice.
+     */
+    public function downloadInvoice(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) {
+            Response::error('No invoices found', 404);
+        }
+
+        try {
+            $stripe  = new StripeService();
+            $invoice = $stripe->getInvoice($params['id']);
+
+            // Verify invoice belongs to this customer
+            if (($invoice['customer'] ?? '') !== $customerId) {
+                Response::error('Invoice not found', 404);
+            }
+
+            Response::success([
+                'download_url'       => $invoice['invoice_pdf'] ?? null,
+                'hosted_invoice_url' => $invoice['hosted_invoice_url'] ?? null,
+            ]);
+        } catch (\RuntimeException $e) {
+            if ($e->getCode() === 404) {
+                Response::error('Invoice not found', 404);
+            }
+            Response::error('Failed to retrieve invoice', 500);
+        }
+    }
+
+    /**
+     * POST /subscription/upgrade
+     * Immediately upgrade or downgrade a subscription via Stripe.
+     */
+    public function upgrade(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $body    = Request::body();
+        $errors  = Request::validate($body, ['tier' => 'required']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        $newTier = $body['tier'];
+        if (!in_array($newTier, ['pro', 'business'])) {
+            Response::error('Invalid tier. Choose pro or business', 422);
+        }
+
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        $subId = $coach['stripe_subscription_id'] ?? null;
+        if (!$subId) {
+            Response::error('No active subscription to upgrade', 400);
+        }
+
+        try {
+            $stripe  = new StripeService();
+            $period  = $body['period'] ?? 'monthly';
+            $priceId = $stripe->getPriceIdForTierAndPeriod($newTier, $period);
+
+            if (empty($priceId)) {
+                Response::error('Stripe price not configured for this tier', 500);
+            }
+
+            $stripe->updateSubscription($subId, $priceId);
+
+            $limit = self::TIER_LIMITS[$newTier] ?? self::TIER_LIMITS['free'];
+
+            Database::collection('coaches')->updateOne(
+                ['_id' => $coachId],
+                ['$set' => [
+                    'subscription_tier'        => $newTier,
+                    'subscription_period'      => $period,
+                    'max_clients'              => $limit,
+                    'cancel_at_period_end'     => false,
+                    'updated_at'               => new \MongoDB\BSON\UTCDateTime(),
+                ]]
+            );
+
+            Response::success([
+                'new_tier'   => $newTier,
+                'new_period' => $period,
+            ], 'Subscription updated successfully');
+        } catch (\RuntimeException $e) {
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                $limit = self::TIER_LIMITS[$newTier] ?? self::TIER_LIMITS['free'];
+                Database::collection('coaches')->updateOne(
+                    ['_id' => $coachId],
+                    ['$set' => [
+                        'subscription_tier'    => $newTier,
+                        'subscription_period'  => $body['period'] ?? 'monthly',
+                        'max_clients'          => $limit,
+                        'cancel_at_period_end' => false,
+                        'updated_at'           => new \MongoDB\BSON\UTCDateTime(),
+                    ]]
+                );
+                Response::success([
+                    'new_tier'   => $newTier,
+                    'new_period' => $body['period'] ?? 'monthly',
+                ], 'Subscription updated successfully (dev mode)');
+                return;
+            }
+            Response::error('Payment processing is not configured. Please contact support.', 503);
+        }
+    }
+
+    /**
+     * GET /payment-methods
+     * List saved payment methods for the authenticated coach.
+     */
+    public function listPaymentMethods(array $params): void
+    {
+        $coachId    = new ObjectId($params['_auth']['sub']);
+        $coach      = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        // No Stripe key configured — return empty list, don't crash
+        if (!StripeService::isConfigured()) {
+            Response::success(['payment_methods' => []]);
+            return;
+        }
+
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) {
+            Response::success(['payment_methods' => []]);
+            return;
+        }
+
+        try {
+            $stripe   = new StripeService();
+            $methods  = $stripe->listPaymentMethods($customerId);
+            $default  = $coach['default_payment_method'] ?? null;
+
+            $formatted = array_map(fn($pm) => [
+                'id'         => $pm['id'],
+                'brand'      => $pm['card']['brand'] ?? null,
+                'last4'      => $pm['card']['last4'] ?? null,
+                'exp_month'  => $pm['card']['exp_month'] ?? null,
+                'exp_year'   => $pm['card']['exp_year'] ?? null,
+                'is_default' => $pm['id'] === $default,
+            ], $methods['data'] ?? []);
+
+            Response::success(['payment_methods' => $formatted]);
+        } catch (\RuntimeException $e) {
+            error_log('Stripe payment methods error: ' . $e->getMessage());
+            Response::success(['payment_methods' => []]);
+        }
+    }
+
+    /**
+     * POST /payment-methods/setup-intent
+     * Create a SetupIntent so the frontend can collect a new payment method.
+     */
+    public function createSetupIntent(array $params): void
+    {
+        $coachId    = new ObjectId($params['_auth']['sub']);
+        $coach      = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        try {
+            $stripe     = new StripeService();
+
+            // Ensure Stripe customer exists
+            $customerId = $coach['stripe_customer_id'] ?? null;
+            if (!$customerId) {
+                $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
+                $customerId = $customer['id'];
+                Database::collection('coaches')->updateOne(
+                    ['_id' => $coachId],
+                    ['$set' => ['stripe_customer_id' => $customerId]]
+                );
+            }
+
+            $intent = $stripe->createSetupIntent($customerId);
+
+            Response::success([
+                'client_secret'  => $intent['client_secret'],
+                'setup_intent_id'=> $intent['id'],
+            ]);
+        } catch (\RuntimeException $e) {
+            // Development fallback: return mock intent so UI can still render
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                Response::success([
+                    'client_secret'   => 'mock_dev_secret_' . bin2hex(random_bytes(8)),
+                    'setup_intent_id' => 'mock_si_' . bin2hex(random_bytes(8)),
+                    'mock'            => true,
+                ]);
+                return;
+            }
+            Response::error('Payment processing is not configured. Please contact support.', 503);
+        }
+    }
+
+    /**
+     * POST /payment-methods
+     * Attach a PaymentMethod (collected by Stripe.js) to the coach.
+     */
+    public function addPaymentMethod(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $body    = Request::body();
+        $errors  = Request::validate($body, ['payment_method_id' => 'required']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) {
+            Response::error('No Stripe customer found. Please start a checkout first.', 400);
+        }
+
+        try {
+            $stripe  = new StripeService();
+            $pmId    = trim($body['payment_method_id']);
+            $stripe->attachPaymentMethod($pmId, $customerId);
+
+            $isDefault = !empty($body['is_default']);
+            if ($isDefault) {
+                $stripe->setDefaultPaymentMethod($customerId, $pmId);
+                Database::collection('coaches')->updateOne(
+                    ['_id' => $coachId],
+                    ['$set' => ['default_payment_method' => $pmId, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
+                );
+            }
+
+            Response::success(['payment_method_id' => $pmId], 'Payment method added', 201);
+        } catch (\RuntimeException $e) {
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                Response::success(['payment_method_id' => 'mock_pm_' . bin2hex(random_bytes(8)), 'mock' => true], 'Payment method added (dev mode)', 201);
+                return;
+            }
+            Response::error('Failed to add payment method: ' . $e->getMessage(), 400);
+        }
+    }
+
+    /**
+     * DELETE /payment-methods/:id
+     * Detach a PaymentMethod from the coach.
+     */
+    public function deletePaymentMethod(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $pmId    = $params['id'] ?? '';
+
+        if (empty($pmId)) Response::error('Payment method ID required', 400);
+
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        try {
+            $stripe = new StripeService();
+            $stripe->detachPaymentMethod($pmId);
+
+            // Clear default if it was the default method
+            if (($coach['default_payment_method'] ?? '') === $pmId) {
+                Database::collection('coaches')->updateOne(
+                    ['_id' => $coachId],
+                    ['$unset' => ['default_payment_method' => ''], '$set' => ['updated_at' => new \MongoDB\BSON\UTCDateTime()]]
+                );
+            }
+
+            Response::success(null, 'Payment method removed');
+        } catch (\RuntimeException $e) {
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                if (($coach['default_payment_method'] ?? '') === $pmId) {
+                    Database::collection('coaches')->updateOne(
+                        ['_id' => $coachId],
+                        ['$unset' => ['default_payment_method' => ''], '$set' => ['updated_at' => new \MongoDB\BSON\UTCDateTime()]]
+                    );
+                }
+                Response::success(null, 'Payment method removed (dev mode)');
+                return;
+            }
+            Response::error('Failed to remove payment method', 400);
+        }
+    }
+
+    /**
+     * POST /payment-methods/:id/default
+     * Set a PaymentMethod as the default for the coach.
+     */
+    public function setDefaultPaymentMethod(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $pmId    = $params['id'] ?? '';
+
+        if (empty($pmId)) Response::error('Payment method ID required', 400);
+
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) Response::error('No Stripe customer found', 400);
+
+        try {
+            $stripe = new StripeService();
+            $stripe->setDefaultPaymentMethod($customerId, $pmId);
+
+            Database::collection('coaches')->updateOne(
+                ['_id' => $coachId],
+                ['$set' => ['default_payment_method' => $pmId, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
+            );
+
+            Response::success(null, 'Default payment method updated');
+        } catch (\RuntimeException $e) {
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                Database::collection('coaches')->updateOne(
+                    ['_id' => $coachId],
+                    ['$set' => ['default_payment_method' => $pmId, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
+                );
+                Response::success(null, 'Default payment method updated (dev mode)');
+                return;
+            }
+            Response::error('Failed to update default payment method', 400);
+        }
     }
 }

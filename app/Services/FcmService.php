@@ -28,18 +28,18 @@ class FcmService
         }
 
         $now = time();
-        $header = rtrim(strtr(base64_encode(json_encode(['alg' => 'RS256', 'typ' => 'JWT'])), '+/', '-_'), '=');
-        $claim = rtrim(strtr(base64_encode(json_encode([
+        $header = base64_encode(json_encode(['alg' => 'RS256', 'typ' => 'JWT']));
+        $claim = base64_encode(json_encode([
             'iss'   => $sa['client_email'],
             'scope' => 'https://www.googleapis.com/auth/firebase.messaging',
             'aud'   => 'https://oauth2.googleapis.com/token',
             'iat'   => $now,
             'exp'   => $now + 3600,
-        ])), '+/', '-_'), '=');
+        ]));
 
         $toSign = "{$header}.{$claim}";
         openssl_sign($toSign, $signature, $sa['private_key'], OPENSSL_ALGO_SHA256);
-        $jwt = "{$toSign}." . rtrim(strtr(base64_encode($signature), '+/', '-_'), '=');
+        $jwt = "{$toSign}." . base64_encode($signature);
 
         $ch = curl_init('https://oauth2.googleapis.com/token');
         curl_setopt_array($ch, [

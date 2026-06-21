@@ -7,7 +7,6 @@ namespace App\Helpers;
 class Router
 {
     private array $routes = [];
-    private array $globalMiddleware = [];
     private string $prefix = '';
 
     /**
@@ -17,14 +16,6 @@ class Router
     public function setPrefix(string $prefix): void
     {
         $this->prefix = rtrim($prefix, '/');
-    }
-
-    /**
-     * Register middleware that runs on every matched route.
-     */
-    public function use(string $middlewareClass): void
-    {
-        $this->globalMiddleware[] = $middlewareClass;
     }
 
     public function get(string $path, callable|array $handler, array $middleware = []): void
@@ -97,9 +88,8 @@ class Router
             if (preg_match($pattern, $uri, $matches)) {
                 $params = array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY);
 
-                // Run global middleware first, then route-specific middleware
-                $allMiddleware = array_merge($this->globalMiddleware, $middleware);
-                foreach ($allMiddleware as $mw) {
+                // Run middleware chain
+                foreach ($middleware as $mw) {
                     $mwInstance = new $mw();
                     $mwInstance->handle($params);
                 }
