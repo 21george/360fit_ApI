@@ -148,10 +148,12 @@ class SettingsController
 
         if (!$coach) Response::error('Coach not found', 404);
 
-        $subject = htmlspecialchars(trim($body['subject']), ENT_QUOTES, 'UTF-8');
-        $message = htmlspecialchars(trim($body['message']), ENT_QUOTES, 'UTF-8');
-        $name    = htmlspecialchars((string) ($coach['name'] ?? 'Unknown'), ENT_QUOTES, 'UTF-8');
-        $email   = (string) ($coach['email'] ?? '');
+        $rawSubject = trim($body['subject']);
+        $rawMessage = trim($body['message']);
+        $subject    = htmlspecialchars($rawSubject, ENT_QUOTES, 'UTF-8');
+        $message    = htmlspecialchars($rawMessage, ENT_QUOTES, 'UTF-8');
+        $name       = htmlspecialchars((string) ($coach['name'] ?? 'Unknown'), ENT_QUOTES, 'UTF-8');
+        $email      = (string) ($coach['email'] ?? '');
 
         // Store ticket in database
         Database::collection('support_tickets')->insertOne([
@@ -175,7 +177,8 @@ class SettingsController
               <p>{$message}</p>
             </div>
             HTML;
-            EmailService::send($supportEmail, "Support Ticket: {$subject}", $html);
+            // Use raw subject for the email subject line (HTML-escaping corrupts non-HTML contexts)
+            EmailService::send($supportEmail, "Support Ticket: {$rawSubject}", $html);
         }
 
         Response::success(null, 'Support ticket submitted. We will get back to you soon.', 201);

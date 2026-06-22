@@ -14,8 +14,12 @@ class RateLimitMiddleware
 
     public function __construct(int $maxRequests = 100, int $windowSeconds = 900)
     {
-        $this->maxRequests   = (int) ($_ENV['RATE_LIMIT_REQUESTS'] ?? $maxRequests);
-        $this->windowSeconds = (int) ($_ENV['RATE_LIMIT_WINDOW']   ?? $windowSeconds);
+        // Use passed values as-is. Subclasses (e.g. AuthRateLimitMiddleware) read
+        // their own env vars before calling parent::__construct, so we must not
+        // override with RATE_LIMIT_REQUESTS here — that would silently discard the
+        // subclass-specific limit and break auth brute-force protection.
+        $this->maxRequests   = $maxRequests;
+        $this->windowSeconds = $windowSeconds;
     }
 
     public function handle(array &$params): void

@@ -329,19 +329,31 @@ class AnalyticsController
         ]);
 
         // ── 2. Active clients (logged a workout in last 7 days) ────────────
+        // workout_logs stores client_id (not coach_id), so resolve via clients collection.
         $sevenDaysAgo = new UTCDateTime((new \DateTime('-7 days'))->getTimestamp() * 1000);
-        $recentLogCursor = Database::collection('workout_logs')->find(
-            ['coach_id' => $coachId, 'completed_at' => ['$gte' => $sevenDaysAgo]],
-            ['projection' => ['client_id' => 1]]
+        $allClientCursor = Database::collection('clients')->find(
+            ['coach_id' => $coachId, 'active' => true],
+            ['projection' => ['_id' => 1]]
         );
-        $activeClientIds = [];
-        foreach ($recentLogCursor as $log) {
-            $activeClientIds[(string) $log['client_id']] = true;
+        $allClientIds = array_map(fn($c) => $c['_id'], iterator_to_array($allClientCursor));
+
+        $activeClients = 0;
+        if (!empty($allClientIds)) {
+            $recentLogCursor = Database::collection('workout_logs')->find(
+                ['client_id' => ['$in' => $allClientIds], 'completed_at' => ['$gte' => $sevenDaysAgo]],
+                ['projection' => ['client_id' => 1]]
+            );
+            $activeClientIds = [];
+            foreach ($recentLogCursor as $log) {
+                $activeClientIds[(string) $log['client_id']] = true;
+            }
+            $activeClients = count($activeClientIds);
         }
-        $activeClients = count($activeClientIds);
 
         // ── 3. Total workouts ──────────────────────────────────────────────
-        $totalWorkouts = Database::collection('workout_logs')->countDocuments(['coach_id' => $coachId]);
+        $totalWorkouts = empty($allClientIds)
+            ? 0
+            : Database::collection('workout_logs')->countDocuments(['client_id' => ['$in' => $allClientIds]]);
 
         // ── 4. Completion rate across all plans ────────────────────────────
         $allPlans = Database::collection('workout_plans')
@@ -355,8 +367,7 @@ class AnalyticsController
             $totalPlanDays += $days;
             if (!empty($plan['client_id'])) {
                 $completedPlanDays += Database::collection('workout_logs')->countDocuments([
-                    'coach_id'       => $coachId,
-                    'client_id'      => $plan['client_id'],
+                    'client_id'       => $plan['client_id'],
                     'workout_plan_id' => $plan['_id'],
                 ]);
             }
@@ -365,10 +376,10 @@ class AnalyticsController
 
         // ── 5. Top clients by workout count (last 30 days) ─────────────────
         $thirtyDaysAgo = new UTCDateTime((new \DateTime('-30 days'))->getTimestamp() * 1000);
-        $recentLogs30 = Database::collection('workout_logs')->find(
-            ['coach_id' => $coachId, 'completed_at' => ['$gte' => $thirtyDaysAgo]],
+        $recentLogs30 = empty($allClientIds) ? [] : Database::collection('workout_logs')->find(
+            ['client_id' => ['$in' => $allClientIds], 'completed_at' => ['$gte' => $thirtyDaysAgo]],
             ['projection' => ['client_id' => 1]]
-        );
+        )->toArray();
         $clientWorkoutCounts = [];
         foreach ($recentLogs30 as $log) {
             $cid = (string) $log['client_id'];

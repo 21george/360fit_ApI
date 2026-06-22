@@ -65,6 +65,8 @@ $router->post('/coach/clients/import',          [ClientController::class, 'impor
 $router->get('/coach/clients/:id',              [ClientController::class, 'show'],           [CoachMiddleware::class]);
 $router->put('/coach/clients/:id',              [ClientController::class, 'update'],         [CoachMiddleware::class]);
 $router->delete('/coach/clients/:id',           [ClientController::class, 'destroy'],        [CoachMiddleware::class]);
+$router->delete('/coach/clients/:id/permanent',  [ClientController::class, 'permanentDelete'], [CoachMiddleware::class]);
+$router->post('/coach/clients/:id/photo',         [ClientController::class, 'uploadClientPhoto'], [CoachMiddleware::class]);
 $router->post('/coach/clients/:id/regenerate-code', [ClientController::class, 'regenerateCode'], [CoachMiddleware::class]);
 $router->post('/coach/clients/:id/block',   [ClientController::class, 'block'],   [CoachMiddleware::class]);
 $router->post('/coach/clients/:id/unblock', [ClientController::class, 'unblock'], [CoachMiddleware::class]);

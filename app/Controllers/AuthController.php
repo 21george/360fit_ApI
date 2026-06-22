@@ -184,8 +184,27 @@ class AuthController
                 'language'          => $matched['language'] ?? 'en',
                 'profile_photo_url' => $matched['profile_photo_url'] ?? null,
                 'notes'             => $matched['notes'] ?? null,
+                'address'           => $matched['address'] ?? null,
+                'city'              => $matched['city'] ?? null,
+                'postal_code'       => $matched['postal_code'] ?? null,
+                'nationality'       => $matched['nationality'] ?? null,
+                'occupation'        => $matched['occupation'] ?? null,
+                'gender'            => $matched['gender'] ?? null,
+                'date_of_birth'     => $matched['date_of_birth'] ?? null,
+                'current_weight_kg' => $matched['current_weight_kg'] ?? null,
+                'height_cm'         => $matched['height_cm'] ?? null,
+                'chest_cm'          => $matched['chest_cm'] ?? null,
+                'waist_cm'          => $matched['waist_cm'] ?? null,
+                'body_fat_pct'      => $matched['body_fat_pct'] ?? null,
+                'bmi'               => $matched['bmi'] ?? null,
+                'lean_mass_kg'      => $matched['lean_mass_kg'] ?? null,
+                'sickness'          => $matched['sickness'] ?? null,
+                'age'               => $matched['age'] ?? null,
+                'weight'            => $matched['weight'] ?? null,
+                'location'          => $matched['location'] ?? null,
                 'active'            => $matched['active'] ?? true,
-                'created_at'        => (string) ($matched['created_at'] ?? ''),
+                'created_at'        => isset($matched['created_at']) ? (string) $matched['created_at'] : null,
+                'updated_at'        => isset($matched['updated_at']) ? (string) $matched['updated_at'] : null,
             ]
         ], 'Login successful');
     }
@@ -208,6 +227,16 @@ class AuthController
         try {
             $decoded = JwtService::decodeRefresh($token);
             if (($decoded['type'] ?? '') !== 'refresh') Response::error('Invalid token type', 401);
+
+            if (($decoded['role'] ?? '') === 'coach') {
+                $coach = Database::collection('coaches')->findOne([
+                    '_id' => new ObjectId((string) $decoded['sub']),
+                ]);
+                if (!$coach || ($coach['active'] ?? true) !== true) {
+                    $this->clearTokenCookies();
+                    Response::error('Coach access blocked', 403);
+                }
+            }
 
             if (($decoded['role'] ?? '') === 'client') {
                 $client = Database::collection('clients')->findOne([

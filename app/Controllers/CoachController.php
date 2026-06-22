@@ -17,6 +17,9 @@ class CoachController {
 
         $data = $this->format($coach);
 
+        // Compute actual client count from the database (stale cached value is unreliable)
+        $data['client_count'] = $this->getClientCount((string) $coach['_id']);
+
         // Generate fresh photo URL from stored key
         if (!empty($coach['profile_photo_key'])) {
             $key = (string) $coach['profile_photo_key'];
@@ -88,6 +91,10 @@ class CoachController {
             ['projection' => ['password_hash' => 0]]
         );
         $data = $this->format($updated);
+
+        // Compute actual client count from the database (stale cached value is unreliable)
+        $data['client_count'] = $this->getClientCount((string) $updated['_id']);
+
         if (!empty($updated['profile_photo_key'])) {
             $key = (string) $updated['profile_photo_key'];
             if (str_starts_with($key, 'local:')) {
@@ -271,6 +278,13 @@ class CoachController {
         );
 
         Response::success(null, 'Password changed successfully');
+    }
+
+    private function getClientCount(string $coachId): int {
+        return Database::collection('clients')->countDocuments([
+            'coach_id' => new ObjectId($coachId),
+            'active'   => true,
+        ]);
     }
 
     private function format($coach): array {

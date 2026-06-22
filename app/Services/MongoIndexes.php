@@ -25,6 +25,11 @@ class MongoIndexes
         $db->getCollection('clients')->createIndexes([
             ['key' => ['coach_id' => 1]],
             ['key' => ['coach_id' => 1, 'active' => 1]],
+            ['key' => ['coach_id' => 1, 'is_blocked' => 1]],
+            ['key' => ['coach_id' => 1, 'deleted_at' => 1]],
+            ['key' => ['email' => 1]],
+            ['key' => ['phone' => 1]],
+            ['key' => ['login_code_hash' => 1]],
         ]);
 
         // workout_plans

@@ -31,20 +31,29 @@ class SubscriptionController
         $status = $coach['subscription_status'] ?? 'none';
         $limit  = self::TIER_LIMITS[$tier] ?? self::TIER_LIMITS['free'];
 
+        // Count active, non-deleted, non-blocked clients
         $clientCount = Database::collection('clients')->countDocuments([
-            'coach_id' => $coachId,
-            'active'   => true,
+            'coach_id'    => $coachId,
+            'active'      => true,
+            'is_blocked'  => ['$ne' => true],
+            'deleted_at'  => ['$exists' => false],
         ]);
 
+        $period          = $coach['subscription_period'] ?? 'monthly';
+        $periodEnd       = isset($coach['subscription_period_end']) ? (string) $coach['subscription_period_end'] : null;
+        $nextPaymentDate = $periodEnd; // same as period end for now
+
         Response::success([
-            'tier'             => $tier,
-            'status'           => $status,
-            'client_limit'     => $limit,
-            'client_count'     => $clientCount,
-            'trial_ends_at'    => isset($coach['trial_ends_at']) ? (string) $coach['trial_ends_at'] : null,
-            'current_period_end' => isset($coach['subscription_period_end']) ? (string) $coach['subscription_period_end'] : null,
-            'cancel_at_period_end' => $coach['cancel_at_period_end'] ?? false,
-            'stripe_customer_id'   => $coach['stripe_customer_id'] ?? null,
+            'tier'                   => $tier,
+            'status'                 => $status,
+            'period'                 => $period,
+            'client_limit'           => $limit,
+            'client_count'           => $clientCount,
+            'trial_ends_at'          => isset($coach['trial_ends_at']) ? (string) $coach['trial_ends_at'] : null,
+            'current_period_end'     => $periodEnd,
+            'next_payment_date'      => $nextPaymentDate,
+            'cancel_at_period_end'   => $coach['cancel_at_period_end'] ?? false,
+            'stripe_customer_id'     => $coach['stripe_customer_id'] ?? null,
         ]);
     }
 
@@ -78,6 +87,7 @@ class SubscriptionController
                 ['_id' => $coachId],
                 ['$set' => [
                     'subscription_tier'   => 'free',
+                    'subscription_period' => 'monthly',
                     'subscription_status' => 'active',
                     'updated_at'          => new \MongoDB\BSON\UTCDateTime(),
                 ]]
@@ -153,12 +163,13 @@ class SubscriptionController
             );
         }
 
-        // Store selected tier temporarily for webhook to use
+        // Store selected tier + period temporarily for webhook to use
         Database::collection('coaches')->updateOne(
             ['_id' => $coachId],
             ['$set' => [
-                'pending_subscription_tier' => $tier,
-                'updated_at'                => new \MongoDB\BSON\UTCDateTime(),
+                'pending_subscription_tier'   => $tier,
+                'pending_subscription_period' => $period,
+                'updated_at'                  => new \MongoDB\BSON\UTCDateTime(),
             ]]
         );
 
@@ -216,6 +227,16 @@ class SubscriptionController
                 ['$set' => ['stripe_customer_id' => $customerId]]
             );
         }
+
+        // Store pending tier+period for webhook handlers
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'pending_subscription_tier'   => $tier,
+                'pending_subscription_period' => $period,
+                'updated_at'                  => new \MongoDB\BSON\UTCDateTime(),
+            ]]
+        );
 
         // Check if this is for signup flow (pending subscription) or upgrade flow
         $isSignupFlow = ($coach['subscription_status'] ?? '') === 'pending';
@@ -340,17 +361,23 @@ class SubscriptionController
 
     private function handleCheckoutCompleted(array $session): void
     {
-        $coachId       = $session['metadata']['coach_id'] ?? null;
+        $coachId        = $session['metadata']['coach_id'] ?? null;
         $subscriptionId = $session['subscription'] ?? null;
-        $customerId    = $session['customer'] ?? null;
+        $customerId     = $session['customer'] ?? null;
         $pendingTier    = $session['metadata']['pending_tier'] ?? null;
 
         if (!$coachId || !$subscriptionId) return;
 
-        // Fetch the subscription to determine tier
+        // Fetch coach to get pending period
+        $coachDoc = Database::collection('coaches')->findOne(['_id' => new ObjectId($coachId)]);
+        $pendingPeriod = $coachDoc['pending_subscription_period'] ?? null;
+
+        // Fetch the subscription to determine tier + period
         $stripe = new StripeService();
         $sub    = $stripe->getSubscription($subscriptionId);
-        $tier   = $this->tierFromPriceId($sub['items']['data'][0]['price']['id'] ?? '');
+        $priceId = $sub['items']['data'][0]['price']['id'] ?? '';
+        $tier   = $this->tierFromPriceId($priceId);
+        $period = $pendingPeriod ?: $this->periodFromPriceId($priceId);
 
         // Use pending_tier from metadata as fallback
         if ($pendingTier && in_array($pendingTier, ['pro', 'business'])) {
@@ -366,13 +393,18 @@ class SubscriptionController
         Database::collection('coaches')->updateOne(
             ['_id' => new ObjectId($coachId)],
             ['$set' => [
-                'stripe_customer_id'     => $customerId,
-                'stripe_subscription_id' => $subscriptionId,
-                'subscription_tier'      => $tier,
-                'subscription_status'    => $status,
+                'stripe_customer_id'      => $customerId,
+                'stripe_subscription_id'  => $subscriptionId,
+                'subscription_tier'       => $tier,
+                'subscription_period'   => $period,
+                'subscription_status'     => $status,
                 'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
-                'cancel_at_period_end'   => false,
-                'updated_at'             => new \MongoDB\BSON\UTCDateTime(),
+                'cancel_at_period_end'    => false,
+                'updated_at'              => new \MongoDB\BSON\UTCDateTime(),
+            ],
+            '$unset' => [
+                'pending_subscription_tier'   => '',
+                'pending_subscription_period' => '',
             ]]
         );
     }
@@ -382,12 +414,15 @@ class SubscriptionController
         $coachId = $sub['metadata']['coach_id'] ?? null;
         if (!$coachId) return;
 
-        $tier = $this->tierFromPriceId($sub['items']['data'][0]['price']['id'] ?? '');
+        $priceId = $sub['items']['data'][0]['price']['id'] ?? '';
+        $tier   = $this->tierFromPriceId($priceId);
+        $period = $this->periodFromPriceId($priceId);
 
         Database::collection('coaches')->updateOne(
             ['_id' => new ObjectId($coachId)],
             ['$set' => [
                 'subscription_tier'       => $tier,
+                'subscription_period'     => $period,
                 'subscription_status'     => $sub['status'] ?? 'active',
                 'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
                 'cancel_at_period_end'    => $sub['cancel_at_period_end'] ?? false,
@@ -405,6 +440,7 @@ class SubscriptionController
             ['_id' => new ObjectId($coachId)],
             ['$set' => [
                 'subscription_tier'      => 'free',
+                'subscription_period'    => 'monthly',
                 'subscription_status'    => 'cancelled',
                 'cancel_at_period_end'   => false,
                 'updated_at'             => new \MongoDB\BSON\UTCDateTime(),
@@ -426,14 +462,19 @@ class SubscriptionController
         );
     }
 
-    private function tierFromPriceId(string $priceId): string
+    private function periodFromPriceId(string $priceId): string
     {
-        $proPriceId      = $_ENV['STRIPE_PRICE_PRO'] ?? '';
-        $businessPriceId = $_ENV['STRIPE_PRICE_BUSINESS'] ?? '';
-
-        if ($priceId === $proPriceId)      return 'pro';
-        if ($priceId === $businessPriceId) return 'business';
-        return 'pro'; // default fallback
+        $periods = ['monthly', 'quarterly', 'semi_annual', 'annual'];
+        foreach ($periods as $period) {
+            $proKey      = 'STRIPE_PRICE_PRO_' . strtoupper($period);
+            $businessKey = 'STRIPE_PRICE_BUSINESS_' . strtoupper($period);
+            if ($priceId === ($_ENV[$proKey] ?? ''))      return $period;
+            if ($priceId === ($_ENV[$businessKey] ?? '')) return $period;
+        }
+        // Fall back to generic tier prices
+        if ($priceId === ($_ENV['STRIPE_PRICE_PRO'] ?? ''))      return 'monthly';
+        if ($priceId === ($_ENV['STRIPE_PRICE_BUSINESS'] ?? '')) return 'monthly';
+        return 'monthly';
     }
 
     /**
@@ -471,18 +512,51 @@ class SubscriptionController
             $response = $stripe->listInvoices($customerId);
             $invoices = $response['data'] ?? [];
 
-            $formatted = array_map(fn($inv) => [
-                'id'              => $inv['id'],
-                'number'          => $inv['number'] ?? null,
-                'amount_paid'     => $inv['amount_paid'] ?? 0,
-                'currency'        => $inv['currency'] ?? 'usd',
-                'status'          => $inv['status'] ?? 'unknown',
-                'period_start'    => $inv['period_start'] ?? null,
-                'period_end'      => $inv['period_end'] ?? null,
-                'hosted_invoice_url' => $inv['hosted_invoice_url'] ?? null,
-                'invoice_pdf'     => $inv['invoice_pdf'] ?? null,
-                'created'         => $inv['created'] ?? null,
-            ], $invoices);
+            $formatted = array_map(function ($inv) {
+                // Convert Stripe cents to dollars
+                $amountCents = $inv['amount_paid'] ?? ($inv['amount_due'] ?? 0);
+                $amountDollars = $amountCents > 0 ? round($amountCents / 100, 2) : 0;
+
+                // Build description from line items if available
+                $description = null;
+                if (!empty($inv['lines']['data'][0]['description'])) {
+                    $description = $inv['lines']['data'][0]['description'];
+                } elseif (!empty($inv['description'])) {
+                    $description = $inv['description'];
+                }
+
+                // Get last4 from charge payment method details
+                $last4 = null;
+                if (!empty($inv['charge']['payment_method_details']['card']['last4'])) {
+                    $last4 = $inv['charge']['payment_method_details']['card']['last4'];
+                } elseif (!empty($inv['payment_intent']['charges']['data'][0]['payment_method_details']['card']['last4'])) {
+                    $last4 = $inv['payment_intent']['charges']['data'][0]['payment_method_details']['card']['last4'];
+                }
+
+                // Convert Stripe timestamp (seconds) to ISO 8601 string
+                $created = $inv['created'] ?? null;
+                $dateStr = null;
+                if ($created) {
+                    $dt = new \DateTime();
+                    $dt->setTimestamp((int) $created);
+                    $dateStr = $dt->format('c');
+                }
+
+                return [
+                    'id'                 => $inv['id'],
+                    'number'             => $inv['number'] ?? null,
+                    'amount'             => $amountDollars,
+                    'currency'           => $inv['currency'] ?? 'usd',
+                    'status'             => $inv['status'] ?? 'unknown',
+                    'date'               => $dateStr,
+                    'period_start'       => $inv['period_start'] ?? null,
+                    'period_end'         => $inv['period_end'] ?? null,
+                    'hosted_invoice_url' => $inv['hosted_invoice_url'] ?? null,
+                    'pdf_url'            => $inv['invoice_pdf'] ?? null,
+                    'description'        => $description,
+                    'last4'              => $last4,
+                ];
+            }, $invoices);
 
             Response::success($formatted);
         } catch (\RuntimeException $e) {

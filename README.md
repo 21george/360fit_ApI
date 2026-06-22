@@ -144,6 +144,48 @@ backend/
 
 ---
 
+## Database Schema (MongoDB)
+
+### `clients` collection
+
+```json
+{
+  "_id": "ObjectId",
+  "coach_id": "ObjectId",
+  "name": "string",
+  "email": "string | null",
+  "phone": "string | null",
+  "gender": "male | female | other | null",
+  "date_of_birth": "string (ISO date) | null",
+  "language": "en | de",
+  "address": "string | null",
+  "city": "string | null",
+  "postal_code": "string | null",
+  "nationality": "string | null",
+  "occupation": "string | null",
+  "notes": "string | null",
+  "sickness": "string | null",
+  "current_weight_kg": "number | null",
+  "height_cm": "number | null",
+  "chest_cm": "number | null",
+  "waist_cm": "number | null",
+  "body_fat_pct": "number | null",
+  "bmi": "number | null",
+  "lean_mass_kg": "number | null",
+  "profile_photo_url": "string | null",
+  "profile_photo_key": "string | null",
+  "login_code_hash": "string",
+  "token_version": "number",
+  "active": "boolean",
+  "is_blocked": "boolean",
+  "deleted_at": "UTCDateTime | null",
+  "created_at": "UTCDateTime",
+  "updated_at": "UTCDateTime"
+}
+```
+
+---
+
 ## API Reference
 
 ### Base URL
@@ -176,16 +218,20 @@ Tokens are also set as httpOnly cookies (`access_token`, `refresh_token`).
 
 ### Coach — Clients
 
-| Endpoint                              | Method         | Description                       |
-| ------------------------------------- | -------------- | --------------------------------- |
-| `/coach/clients`                      | GET            | List clients (search, pagination) |
-| `/coach/clients`                      | POST           | Create client                     |
-| `/coach/clients/:id`                  | GET/PUT/DELETE | View / update / delete client     |
-| `/coach/clients/:id/block`            | POST           | Block client (revokes sessions)   |
-| `/coach/clients/:id/unblock`          | POST           | Restore client access             |
-| `/coach/clients/:id/analytics`        | GET            | Client analytics                  |
-| `/coach/clients/:id/logs`             | GET            | Workout logs for client           |
-| `/coach/clients/:id/workout-analyses` | GET/POST       | AI workout analysis               |
+| Endpoint                                 | Method         | Description                       |
+| ---------------------------------------- | -------------- | --------------------------------- |
+| `/coach/clients`                         | GET            | List clients (search, pagination) |
+| `/coach/clients`                         | POST           | Create client                     |
+| `/coach/clients/import`                  | POST           | Bulk import clients               |
+| `/coach/clients/:id`                     | GET/PUT/DELETE | View / update / soft-delete       |
+| `/coach/clients/:id/permanent`           | DELETE         | Permanent delete (cascade)        |
+| `/coach/clients/:id/photo`               | POST           | Upload profile photo              |
+| `/coach/clients/:id/regenerate-code`     | POST           | Regenerate login code             |
+| `/coach/clients/:id/block`               | POST           | Block client (revokes sessions)   |
+| `/coach/clients/:id/unblock`             | POST           | Restore client access             |
+| `/coach/clients/:id/analytics`           | GET            | Client analytics                  |
+| `/coach/clients/:id/logs`                | GET            | Workout logs for client           |
+| `/coach/clients/:id/workout-analyses`    | GET/POST       | AI workout analysis               |
 
 ### Subscriptions & Billing
 
