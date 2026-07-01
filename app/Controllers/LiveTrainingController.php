@@ -64,6 +64,18 @@ class LiveTrainingController
         $timestamp = strtotime($body['scheduled_at']);
         if ($timestamp === false) Response::error('Invalid scheduled_at date', 422);
 
+        // meeting_link is rendered as <a href=...> in the frontend,
+        // so it MUST be a real http(s) URL — otherwise a coach could
+        // store "javascript:..." and XSS every client who clicks it.
+        $meetingLink = trim((string) ($body['meeting_link'] ?? ''));
+        if ($meetingLink !== '') {
+            $validated = filter_var($meetingLink, FILTER_VALIDATE_URL);
+            if ($validated === false || !preg_match('#^https?://#i', $validated)) {
+                Response::error('meeting_link must be an http(s) URL', 422);
+            }
+            $meetingLink = $validated;
+        }
+
         $result = Database::collection('live_training_sessions')->insertOne([
             'coach_id'         => $coachId,
             'title'            => trim($body['title']),
@@ -74,7 +86,7 @@ class LiveTrainingController
             'scheduled_at'     => new UTCDateTime($timestamp * 1000),
             'max_participants' => (int) ($body['max_participants'] ?? 20),
             'requires_approval'=> (bool) ($body['requires_approval'] ?? false),
-            'meeting_link'     => trim($body['meeting_link'] ?? ''),
+            'meeting_link'     => $meetingLink,
             'status'           => 'upcoming',
             'participant_ids'  => [],
             'created_at'       => new UTCDateTime(),
@@ -122,6 +134,19 @@ class LiveTrainingController
             } elseif ($field === 'level') {
                 if (!in_array($body[$field], self::LEVELS, true)) Response::error('Invalid level', 422);
                 $set[$field] = $body[$field];
+            } elseif ($field === 'meeting_link') {
+                // Same XSS guard as in store(): an empty value is OK
+                // (clearing the field), otherwise must be http(s).
+                $val = is_string($body[$field]) ? trim($body[$field]) : '';
+                if ($val === '') {
+                    $set[$field] = '';
+                } else {
+                    $validated = filter_var($val, FILTER_VALIDATE_URL);
+                    if ($validated === false || !preg_match('#^https?://#i', $validated)) {
+                        Response::error('meeting_link must be an http(s) URL', 422);
+                    }
+                    $set[$field] = $validated;
+                }
             } else {
                 $set[$field] = is_string($body[$field]) ? trim($body[$field]) : $body[$field];
             }
