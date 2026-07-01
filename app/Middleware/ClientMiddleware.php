@@ -25,7 +25,7 @@ class ClientMiddleware extends AuthMiddleware
         }
 
         // Check if client is blocked (is_blocked flag or inactive)
-        if (($client['is_blocked'] ?? false) || !$client['active']) {
+        if (($client['is_blocked'] ?? false) || !($client['active'] ?? false)) {
             Response::error('Client access blocked', 403);
         }
 
@@ -37,5 +37,15 @@ class ClientMiddleware extends AuthMiddleware
         }
 
         $params['_client'] = $client;
+
+        // Set request context for RLS
+        \App\Helpers\RequestContext::setAuth([
+            'sub'           => (string) $params['_auth']['sub'],
+            'role'          => 'client',
+            'name'          => $client['name'] ?? null,
+            'email'         => $client['email'] ?? null,
+            'coach_id'      => isset($client['coach_id']) ? (string) $client['coach_id'] : null,
+            'token_version' => $client['token_version'] ?? 0,
+        ]);
     }
 }

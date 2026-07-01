@@ -290,8 +290,7 @@ class CoachingSessionController
         $coachIds = array_values(array_unique(array_map(fn($s) => (string) $s['coach_id'], $sessions)));
         $coachMap = [];
         if ($coachIds) {
-            $oids = array_map(fn($id) => new ObjectId($id), $coachIds);
-            foreach (Database::collection('coaches')->find(['_id' => ['$in' => $oids]]) as $c) {
+            foreach (Database::collection('coaches')->find(['_id' => ['$in' => array_map(fn($id) => new ObjectId($id), $coachIds)]]) as $c) {
                 $coachMap[(string) $c['_id']] = $c;
             }
         }
@@ -382,11 +381,10 @@ class CoachingSessionController
     /** @param mixed[] $oidArray */
     private function buildClientMap(array $oidArray): array
     {
+        if (empty($oidArray)) return [];
         $map = [];
-        if (empty($oidArray)) return $map;
-        $unique = array_values(array_unique(array_map(fn($id) => (string) $id, $oidArray)));
-        $oids   = array_map(fn($id) => new ObjectId($id), $unique);
-        foreach (Database::collection('clients')->find(['_id' => ['$in' => $oids]]) as $c) {
+        $ids = array_values(array_unique(array_map('strval', $oidArray)));
+        foreach (Database::collection('clients')->find(['_id' => ['$in' => array_map(fn($id) => new ObjectId($id), $ids)]]) as $c) {
             $map[(string) $c['_id']] = $c;
         }
         return $map;

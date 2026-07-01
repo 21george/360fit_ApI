@@ -21,7 +21,6 @@ class SubscriptionMiddleware
 
         if (!$coach) {
             Response::error('Coach not found', 404);
-            return;
         }
 
         $tier  = $coach['subscription_tier'] ?? 'free';

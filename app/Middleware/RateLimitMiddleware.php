@@ -66,14 +66,14 @@ class RateLimitMiddleware
 
     private function getClientIp(): string
     {
-        $remoteAddr = filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP);
-        $trustedProxies = array_values(array_filter(
+        $remoteAddr = filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP) ?: null;
+        $trustedProxies = array_filter(
             array_map('trim', explode(',', (string) ($_ENV['TRUSTED_PROXIES'] ?? ''))),
             fn(string $ip): bool => filter_var($ip, FILTER_VALIDATE_IP) !== false
-        ));
+        );
 
         if (
-            $remoteAddr !== false
+            $remoteAddr
             && in_array($remoteAddr, $trustedProxies, true)
             && !empty($_SERVER['HTTP_X_FORWARDED_FOR'])
         ) {
@@ -84,10 +84,6 @@ class RateLimitMiddleware
             }
         }
 
-        if ($remoteAddr !== false) {
-            return $remoteAddr;
-        }
-
-        return '0.0.0.0';
+        return $remoteAddr ?: '0.0.0.0';
     }
 }

@@ -129,7 +129,6 @@ class SubscriptionController
                 'tier'          => 'free',
                 'redirect'      => '/dashboard',
             ], 'Free plan activated');
-            return;
         }
 
         // For paid tiers: create Stripe customer and checkout session
@@ -141,7 +140,6 @@ class SubscriptionController
                     'checkout_url' => '/subscription/mock-checkout?tier=' . $tier,
                     'tier'         => $tier,
                 ], 'Ready for checkout (dev mode)');
-                return;
             }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
@@ -206,7 +204,6 @@ class SubscriptionController
         } catch (\RuntimeException $e) {
             if (($_ENV['APP_ENV'] ?? '') === 'development') {
                 Response::success(['checkout_url' => '/subscription/mock-checkout?tier=' . $tier], 'Checkout session created (dev mode)');
-                return;
             }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
@@ -271,7 +268,6 @@ class SubscriptionController
         } catch (\RuntimeException $e) {
             if (($_ENV['APP_ENV'] ?? '') === 'development') {
                 Response::success(['portal_url' => '/subscription/mock-portal'], 'Portal session created (dev mode)');
-                return;
             }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
@@ -304,7 +300,6 @@ class SubscriptionController
                     ['$set' => ['cancel_at_period_end' => true, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
                 );
                 Response::success(null, 'Subscription will cancel at end of billing period (dev mode)');
-                return;
             }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
@@ -332,7 +327,6 @@ class SubscriptionController
             $event  = $stripe->verifyWebhookSignature($payload, $sigHeader);
         } catch (\RuntimeException $e) {
             Response::error('Webhook verification failed', 400);
-            return;
         }
 
         $type = $event['type'] ?? '';
@@ -498,13 +492,11 @@ class SubscriptionController
         // No Stripe key configured — return empty list, don't crash
         if (!StripeService::isConfigured()) {
             Response::success([]);
-            return;
         }
 
         $customerId = $coach['stripe_customer_id'] ?? null;
         if (!$customerId) {
             Response::success([]);
-            return;
         }
 
         try {
@@ -513,48 +505,24 @@ class SubscriptionController
             $invoices = $response['data'] ?? [];
 
             $formatted = array_map(function ($inv) {
-                // Convert Stripe cents to dollars
                 $amountCents = $inv['amount_paid'] ?? ($inv['amount_due'] ?? 0);
-                $amountDollars = $amountCents > 0 ? round($amountCents / 100, 2) : 0;
-
-                // Build description from line items if available
-                $description = null;
-                if (!empty($inv['lines']['data'][0]['description'])) {
-                    $description = $inv['lines']['data'][0]['description'];
-                } elseif (!empty($inv['description'])) {
-                    $description = $inv['description'];
-                }
-
-                // Get last4 from charge payment method details
-                $last4 = null;
-                if (!empty($inv['charge']['payment_method_details']['card']['last4'])) {
-                    $last4 = $inv['charge']['payment_method_details']['card']['last4'];
-                } elseif (!empty($inv['payment_intent']['charges']['data'][0]['payment_method_details']['card']['last4'])) {
-                    $last4 = $inv['payment_intent']['charges']['data'][0]['payment_method_details']['card']['last4'];
-                }
-
-                // Convert Stripe timestamp (seconds) to ISO 8601 string
                 $created = $inv['created'] ?? null;
-                $dateStr = null;
-                if ($created) {
-                    $dt = new \DateTime();
-                    $dt->setTimestamp((int) $created);
-                    $dateStr = $dt->format('c');
-                }
 
                 return [
                     'id'                 => $inv['id'],
                     'number'             => $inv['number'] ?? null,
-                    'amount'             => $amountDollars,
+                    'amount'             => $amountCents > 0 ? round($amountCents / 100, 2) : 0,
                     'currency'           => $inv['currency'] ?? 'usd',
                     'status'             => $inv['status'] ?? 'unknown',
-                    'date'               => $dateStr,
+                    'date'               => $created ? (new \DateTime())->setTimestamp((int) $created)->format('c') : null,
                     'period_start'       => $inv['period_start'] ?? null,
                     'period_end'         => $inv['period_end'] ?? null,
                     'hosted_invoice_url' => $inv['hosted_invoice_url'] ?? null,
                     'pdf_url'            => $inv['invoice_pdf'] ?? null,
-                    'description'        => $description,
-                    'last4'              => $last4,
+                    'description'        => $inv['lines']['data'][0]['description'] ?? $inv['description'] ?? null,
+                    'last4'              => $inv['charge']['payment_method_details']['card']['last4']
+                                            ?? $inv['payment_intent']['charges']['data'][0]['payment_method_details']['card']['last4']
+                                            ?? null,
                 ];
             }, $invoices);
 
@@ -670,7 +638,6 @@ class SubscriptionController
                     'new_tier'   => $newTier,
                     'new_period' => $body['period'] ?? 'monthly',
                 ], 'Subscription updated successfully (dev mode)');
-                return;
             }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
@@ -689,13 +656,11 @@ class SubscriptionController
         // No Stripe key configured — return empty list, don't crash
         if (!StripeService::isConfigured()) {
             Response::success(['payment_methods' => []]);
-            return;
         }
 
         $customerId = $coach['stripe_customer_id'] ?? null;
         if (!$customerId) {
             Response::success(['payment_methods' => []]);
-            return;
         }
 
         try {
@@ -757,7 +722,6 @@ class SubscriptionController
                     'setup_intent_id' => 'mock_si_' . bin2hex(random_bytes(8)),
                     'mock'            => true,
                 ]);
-                return;
             }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
@@ -800,7 +764,6 @@ class SubscriptionController
         } catch (\RuntimeException $e) {
             if (($_ENV['APP_ENV'] ?? '') === 'development') {
                 Response::success(['payment_method_id' => 'mock_pm_' . bin2hex(random_bytes(8)), 'mock' => true], 'Payment method added (dev mode)', 201);
-                return;
             }
             Response::error('Failed to add payment method: ' . $e->getMessage(), 400);
         }
@@ -842,7 +805,6 @@ class SubscriptionController
                     );
                 }
                 Response::success(null, 'Payment method removed (dev mode)');
-                return;
             }
             Response::error('Failed to remove payment method', 400);
         }
@@ -882,7 +844,6 @@ class SubscriptionController
                     ['$set' => ['default_payment_method' => $pmId, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
                 );
                 Response::success(null, 'Default payment method updated (dev mode)');
-                return;
             }
             Response::error('Failed to update default payment method', 400);
         }

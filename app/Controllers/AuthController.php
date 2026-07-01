@@ -64,11 +64,12 @@ class AuthController
             Response::error('Invalid credentials', 401);
         }
 
+        $coachId = (string) $coach['_id'];
         $payload = [
-            'sub'      => (string) $coach['_id'],
-            'role'     => 'coach',
-            'name'     => $coach['name'],
-            'email'    => $coach['email'],
+            'sub'   => $coachId,
+            'role'  => 'coach',
+            'name'  => $coach['name'],
+            'email' => $coach['email'],
         ];
 
         $accessToken  = JwtService::generateAccessToken($payload);
@@ -79,7 +80,7 @@ class AuthController
             'access_token'  => $accessToken,
             'refresh_token' => $refreshToken,
             'coach'         => [
-                'id'       => (string) $coach['_id'],
+                'id'       => $coachId,
                 'name'     => $coach['name'],
                 'email'    => $coach['email'],
                 'language' => $coach['language'] ?? 'en',
@@ -128,8 +129,6 @@ class AuthController
         ], 'Registration successful. Please select your subscription plan.', 201);
     }
 
-   
-
     // POST /auth/client/login
     public function clientLogin(array $params): void
     {
@@ -153,6 +152,8 @@ class AuthController
             Response::error('Client access blocked', 403);
         }
 
+        $clientId = (string) $matched['_id'];
+
         // Update FCM token if provided
         if (!empty($body['fcm_token'])) {
             Database::collection('clients')->updateOne(
@@ -162,7 +163,7 @@ class AuthController
         }
 
         $payload = [
-            'sub'           => (string) $matched['_id'],
+            'sub'           => $clientId,
             'role'          => 'client',
             'name'          => $matched['name'],
             'coach_id'      => (string) $matched['coach_id'],
@@ -173,39 +174,20 @@ class AuthController
         $refreshToken = JwtService::generateRefreshToken($payload);
         $this->setTokenCookies($accessToken, $refreshToken);
 
+        $fields = ['email','phone','profile_photo_url','notes','address','city','postal_code','nationality','occupation','gender','date_of_birth','current_weight_kg','height_cm','chest_cm','waist_cm','body_fat_pct','bmi','lean_mass_kg','sickness','age','weight','location'];
+        $clientData = ['id' => $clientId, 'name' => $matched['name']];
+        foreach ($fields as $f) {
+            $clientData[$f] = $matched[$f] ?? null;
+        }
+        $clientData['language']   = $matched['language'] ?? 'en';
+        $clientData['active']     = $matched['active'] ?? true;
+        $clientData['created_at'] = isset($matched['created_at']) ? (string) $matched['created_at'] : null;
+        $clientData['updated_at'] = isset($matched['updated_at']) ? (string) $matched['updated_at'] : null;
+
         Response::success([
             'access_token'  => $accessToken,
             'refresh_token' => $refreshToken,
-            'client'        => [
-                'id'                => (string) $matched['_id'],
-                'name'              => $matched['name'],
-                'email'             => $matched['email'] ?? null,
-                'phone'             => $matched['phone'] ?? null,
-                'language'          => $matched['language'] ?? 'en',
-                'profile_photo_url' => $matched['profile_photo_url'] ?? null,
-                'notes'             => $matched['notes'] ?? null,
-                'address'           => $matched['address'] ?? null,
-                'city'              => $matched['city'] ?? null,
-                'postal_code'       => $matched['postal_code'] ?? null,
-                'nationality'       => $matched['nationality'] ?? null,
-                'occupation'        => $matched['occupation'] ?? null,
-                'gender'            => $matched['gender'] ?? null,
-                'date_of_birth'     => $matched['date_of_birth'] ?? null,
-                'current_weight_kg' => $matched['current_weight_kg'] ?? null,
-                'height_cm'         => $matched['height_cm'] ?? null,
-                'chest_cm'          => $matched['chest_cm'] ?? null,
-                'waist_cm'          => $matched['waist_cm'] ?? null,
-                'body_fat_pct'      => $matched['body_fat_pct'] ?? null,
-                'bmi'               => $matched['bmi'] ?? null,
-                'lean_mass_kg'      => $matched['lean_mass_kg'] ?? null,
-                'sickness'          => $matched['sickness'] ?? null,
-                'age'               => $matched['age'] ?? null,
-                'weight'            => $matched['weight'] ?? null,
-                'location'          => $matched['location'] ?? null,
-                'active'            => $matched['active'] ?? true,
-                'created_at'        => isset($matched['created_at']) ? (string) $matched['created_at'] : null,
-                'updated_at'        => isset($matched['updated_at']) ? (string) $matched['updated_at'] : null,
-            ]
+            'client'        => $clientData,
         ], 'Login successful');
     }
 
@@ -263,8 +245,9 @@ class AuthController
                 'name'          => $decoded['name'],
                 'token_version' => $decoded['token_version'] ?? 0,
             ];
-            if (isset($decoded['coach_id'])) $payload['coach_id'] = $decoded['coach_id'];
-            if (isset($decoded['email']))    $payload['email']    = $decoded['email'];
+            foreach (['coach_id', 'email'] as $k) {
+                if (isset($decoded[$k])) $payload[$k] = $decoded[$k];
+            }
 
             $accessToken  = JwtService::generateAccessToken($payload);
             $refreshToken = JwtService::generateRefreshToken($payload);

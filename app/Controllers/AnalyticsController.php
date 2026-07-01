@@ -161,11 +161,10 @@ class AnalyticsController
 
         // ── 7. Top 5 personal records ─────────────────────────────────────
         arsort($personalRecords);
-        $topPRs = array_slice(array_map(fn($name, $pr) => [
-            'exercise' => $name,
-            'max_kg'   => $pr['max_kg'],
-            'date'     => $pr['date'],
-        ], array_keys($personalRecords), array_values($personalRecords)), 0, 10);
+        $topPRs = [];
+        foreach (array_slice($personalRecords, 0, 10, true) as $name => $pr) {
+            $topPRs[] = ['exercise' => $name, 'max_kg' => $pr['max_kg'], 'date' => $pr['date']];
+        }
 
         Response::success([
             'completion_rate'   => $completionData,
@@ -268,11 +267,10 @@ class AnalyticsController
         }
 
         arsort($personalRecords);
-        $topPRs = array_slice(array_map(fn($name, $pr) => [
-            'exercise' => $name,
-            'max_kg'   => $pr['max_kg'],
-            'date'     => $pr['date'],
-        ], array_keys($personalRecords), array_values($personalRecords)), 0, 10);
+        $topPRs = [];
+        foreach (array_slice($personalRecords, 0, 10, true) as $name => $pr) {
+            $topPRs[] = ['exercise' => $name, 'max_kg' => $pr['max_kg'], 'date' => $pr['date']];
+        }
 
         // Weekly volume (last 8 weeks)
         $weeklyVolume   = [];
@@ -462,12 +460,13 @@ class AnalyticsController
 
         // ── 4. Top clients by session count (last 30 days) ─────────────────
         $thirtyDaysAgo = new UTCDateTime((new \DateTime('-30 days'))->getTimestamp() * 1000);
-        $recent30 = array_filter($allSessions, function ($s) use ($thirtyDaysAgo) {
+        $thirtyDaysAgoTs = $thirtyDaysAgo->toDateTime()->getTimestamp();
+        $recent30 = array_filter($allSessions, function ($s) use ($thirtyDaysAgoTs) {
             if (!isset($s['scheduled_at'])) return false;
             $ts = $s['scheduled_at'] instanceof UTCDateTime
                 ? $s['scheduled_at']->toDateTime()->getTimestamp()
                 : strtotime((string) $s['scheduled_at']);
-            return $ts !== false && $ts >= ($thirtyDaysAgo->toDateTime()->getTimestamp());
+            return $ts !== false && $ts >= $thirtyDaysAgoTs;
         });
 
         $clientSessionCounts = [];

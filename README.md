@@ -1,6 +1,6 @@
 # CoachPro — PHP Backend API
 
-A RESTful PHP backend powering the CoachPro coaching platform. Uses MongoDB as the database, JWT for authentication, Stripe for subscriptions, and S3/R2 for media storage.
+RESTful PHP API powering the CoachPro coaching platform. Uses MongoDB Atlas as the database, JWT (Bearer + httpOnly cookies) for authentication, Stripe for subscriptions, LiveKit for video sessions, and AWS S3 / Cloudflare R2 for media storage.
 
 ---
 
@@ -9,12 +9,14 @@ A RESTful PHP backend powering the CoachPro coaching platform. Uses MongoDB as t
 | Layer    | Technology                                        |
 | -------- | ------------------------------------------------- |
 | Language | PHP 8.1+                                          |
-| Database | MongoDB (Atlas)                                   |
-| Auth     | JWT (Bearer + httpOnly cookies)                   |
+| Database | MongoDB Atlas                                     |
+| Auth     | JWT (Bearer tokens + httpOnly cookies)            |
 | Payments | Stripe (subscriptions, invoices, payment methods) |
-| Email    | PHPMailer / SMTP                                  |
-| Media    | AWS S3 / Cloudflare R2                            |
+| Email    | SMTP via PHPMailer                                |
+| Media    | AWS S3 / Cloudflare R2 (presigned URLs)           |
 | Push     | Firebase Cloud Messaging (FCM v1)                 |
+| Video    | LiveKit (coaching sessions + live training)       |
+| Router   | Custom lightweight PHP router (no framework)      |
 
 ---
 
@@ -119,25 +121,34 @@ backend/
 │   │   ├── SubscriptionMiddleware.php  # Enforces client cap by tier
 │   │   └── AuthRateLimitMiddleware.php
 │   └── Services/
-│       ├── JwtService.php
-│       ├── StripeService.php     # Full Stripe API wrapper
-│       ├── EmailService.php      # Transactional email via SMTP
-│       ├── S3Service.php         # Media upload / presigned URLs
-│       ├── FcmService.php        # Push notifications
-│       ├── WorkoutAnalysisService.php
-│       ├── NotificationService.php
-│       └── MongoIndexes.php      # Index definitions
-├── bootstrap/app.php             # CORS, error handlers, router init
+│       ├── JwtService.php                    # Access + refresh + setup token generation/validation
+│       ├── CodeService.php                   # Client login code generation + bcrypt hashing
+│       ├── StripeService.php                 # Full Stripe API wrapper (cURL)
+│       ├── EmailService.php                  # Transactional email via SMTP
+│       ├── S3Service.php                     # Media upload / presigned URLs (S3 / R2)
+│       ├── MediaService.php                  # Photo upload helper
+│       ├── FcmService.php                    # Firebase push notifications (FCM v1)
+│       ├── LiveKitService.php                # LiveKit room token generation
+│       ├── ExcelImportService.php            # Bulk client import from XLSX/CSV
+│       ├── WorkoutAnalysisService.php        # AI workout metrics computation
+│       ├── NotificationService.php           # In-app notification sender
+│       ├── NotificationTriggerService.php    # Domain event → notification triggers
+│       ├── PushNotificationService.php       # Expo push notification delivery
+│       ├── ScheduledNotificationService.php  # Cron reminder sender
+│       └── MongoIndexes.php                  # Index definitions (run setup-indexes.php)
+├── bootstrap/app.php             # CORS headers, error/exception handlers, router init
 ├── config/
-│   ├── cors.php                  # Allowed origins (merges .env ALLOWED_ORIGINS)
-│   └── Database.php
+│   ├── cors.php                  # Allowed origins list (merged with .env ALLOWED_ORIGINS)
+│   └── Database.php              # MongoDB singleton (reads MONGO_URI)
 ├── public/
-│   ├── index.php                 # Entry point
-│   └── router.php                # Dev-server router
+│   ├── index.php                 # Entry point (loads .env, bootstrap, router)
+│   └── router.php                # PHP built-in dev-server router
 ├── routes/
-│   └── api.php                   # All route registrations (v1 prefix)
+│   ├── api.php                   # All route registrations (v1 prefix)
+│   └── notifications.php         # Coach notification routes
 ├── scripts/
-│   └── send-reminders.php        # Cron: send scheduled notifications
+│   └── send-reminders.php        # Cron script: send scheduled push reminders
+├── setup-indexes.php             # One-time MongoDB index creation script
 ├── .env.example
 └── composer.json
 ```
@@ -190,91 +201,284 @@ backend/
 
 ### Base URL
 
-`http://localhost:8000/v1`
+```
+http://localhost:8000/v1
+```
 
-### Authentication
-
-All protected endpoints require `Authorization: Bearer <access_token>`.
+All protected endpoints require `Authorization: Bearer <access_token>`.  
 Tokens are also set as httpOnly cookies (`access_token`, `refresh_token`).
-
-| Endpoint               | Method | Auth   | Description                          |
-| ---------------------- | ------ | ------ | ------------------------------------ |
-| `/health`              | GET    | —      | Health check + DB ping               |
-| `/auth/coach/register` | POST   | —      | Register coach (returns setup_token) |
-| `/auth/coach/login`    | POST   | —      | Coach login                          |
-| `/auth/client/login`   | POST   | —      | Client login (by code)               |
-| `/auth/refresh`        | POST   | Cookie | Refresh access token                 |
-| `/auth/logout`         | POST   | Bearer | Logout                               |
-
-### Coach — Profile
-
-| Endpoint                  | Method | Description           |
-| ------------------------- | ------ | --------------------- |
-| `/coach/profile`          | GET    | Get own profile       |
-| `/coach/profile`          | PUT    | Update profile fields |
-| `/coach/profile/photo`    | POST   | Upload profile photo  |
-| `/coach/profile/photo`    | DELETE | Remove profile photo  |
-| `/coach/profile/password` | PUT    | Change password       |
-
-### Coach — Clients
-
-| Endpoint                                 | Method         | Description                       |
-| ---------------------------------------- | -------------- | --------------------------------- |
-| `/coach/clients`                         | GET            | List clients (search, pagination) |
-| `/coach/clients`                         | POST           | Create client                     |
-| `/coach/clients/import`                  | POST           | Bulk import clients               |
-| `/coach/clients/:id`                     | GET/PUT/DELETE | View / update / soft-delete       |
-| `/coach/clients/:id/permanent`           | DELETE         | Permanent delete (cascade)        |
-| `/coach/clients/:id/photo`               | POST           | Upload profile photo              |
-| `/coach/clients/:id/regenerate-code`     | POST           | Regenerate login code             |
-| `/coach/clients/:id/block`               | POST           | Block client (revokes sessions)   |
-| `/coach/clients/:id/unblock`             | POST           | Restore client access             |
-| `/coach/clients/:id/analytics`           | GET            | Client analytics                  |
-| `/coach/clients/:id/logs`                | GET            | Workout logs for client           |
-| `/coach/clients/:id/workout-analyses`    | GET/POST       | AI workout analysis               |
-
-### Subscriptions & Billing
-
-| Endpoint                              | Method | Description                                  |
-| ------------------------------------- | ------ | -------------------------------------------- |
-| `/subscription/select-plan`           | POST   | Select plan after registration (setup token) |
-| `/subscription`                       | GET    | Current subscription status                  |
-| `/subscription/checkout`              | POST   | Create Stripe checkout session               |
-| `/subscription/upgrade`               | POST   | Upgrade / change plan immediately            |
-| `/subscription/portal`                | POST   | Open Stripe customer portal                  |
-| `/subscription/cancel`                | POST   | Cancel at end of period                      |
-| `/subscription/invoices`              | GET    | List all invoices                            |
-| `/subscription/invoices/:id/download` | GET    | Invoice download / hosted URL                |
-| `/subscription/webhook`               | POST   | Stripe webhook receiver                      |
-| `/payment-methods`                    | GET    | List saved payment methods                   |
-| `/payment-methods`                    | POST   | Attach new payment method                    |
-| `/payment-methods/setup-intent`       | POST   | Create SetupIntent                           |
-| `/payment-methods/:id`                | DELETE | Detach payment method                        |
-| `/payment-methods/:id/default`        | POST   | Set default payment method                   |
-
-### Settings
-
-| Endpoint                 | Method  | Description                        |
-| ------------------------ | ------- | ---------------------------------- |
-| `/integrations/settings` | GET/PUT | Webhook URL + API key              |
-| `/notification-settings` | GET/PUT | Email/DND notification preferences |
-| `/support/contact`       | POST    | Submit support ticket              |
 
 ---
 
-## Excel / CSV Workout Import
+### Auth
 
-`POST /workout-plans/import` — upload `.xlsx`, `.xls`, or `.csv`
+| Endpoint               | Method | Auth        | Description                            |
+| ---------------------- | ------ | ----------- | -------------------------------------- |
+| `/health`              | GET    | —           | Health check + DB ping                 |
+| `/auth/coach/register` | POST   | —           | Register coach → returns `setup_token` |
+| `/auth/coach/login`    | POST   | —           | Coach login → tokens + coach object    |
+| `/auth/client/login`   | POST   | —           | Client login by FIT-XXXX-XX code       |
+| `/auth/refresh`        | POST   | Cookie/Body | Refresh access token                   |
+| `/auth/logout`         | POST   | Bearer      | Invalidate session, clear cookies      |
 
-**Required columns** (case-insensitive): `client_name`, `week_start`, `day`, `exercise`, `sets`, `reps`  
-**Optional**: `rest`, `notes`
+---
+
+### Coach — Profile
+
+| Endpoint                  | Method | Description                    |
+| ------------------------- | ------ | ------------------------------ |
+| `/coach/profile`          | GET    | Get own coach profile          |
+| `/coach/profile`          | PUT    | Update name, email, language … |
+| `/coach/profile/photo`    | POST   | Upload / replace profile photo |
+| `/coach/profile/photo`    | DELETE | Remove profile photo           |
+| `/coach/profile/password` | PUT    | Change password                |
+| `/coach/profile`          | DELETE | Delete own account             |
+| `/coaches/registered`     | GET    | List all registered coaches    |
+
+---
+
+### Coach — Clients
+
+| Endpoint                                                  | Method | Description                         |
+| --------------------------------------------------------- | ------ | ----------------------------------- |
+| `/coach/clients`                                          | GET    | List clients (search, sort, page)   |
+| `/coach/clients`                                          | POST   | Create client (returns login code)  |
+| `/coach/clients/import`                                   | POST   | Bulk import from JSON array         |
+| `/coach/clients/:id`                                      | GET    | Get single client                   |
+| `/coach/clients/:id`                                      | PUT    | Update client fields                |
+| `/coach/clients/:id`                                      | DELETE | Soft-delete (sets `active=false`)   |
+| `/coach/clients/:id/permanent`                            | DELETE | Hard-delete (cascades all data)     |
+| `/coach/clients/:id/photo`                                | POST   | Upload client profile photo         |
+| `/coach/clients/:id/regenerate-code`                      | POST   | Regenerate FIT login code           |
+| `/coach/clients/:id/block`                                | POST   | Block client, invalidate all tokens |
+| `/coach/clients/:id/unblock`                              | POST   | Restore client access               |
+| `/coach/clients/:id/analytics`                            | GET    | Completion rate, weight progress …  |
+| `/coach/clients/:id/logs`                                 | GET    | All workout logs                    |
+| `/coach/clients/:id/live-progress`                        | GET    | Live workout progress               |
+| `/coach/clients/:id/workout-progress`                     | GET    | Historical workout progress         |
+| `/coach/clients/:id/measurements`                         | POST   | Store body measurement              |
+| `/coach/clients/:id/workout-analyses`                     | GET    | List AI analyses                    |
+| `/coach/clients/:id/workout-analyses`                     | POST   | Generate new AI analysis            |
+| `/coach/clients/:id/workout-analyses/recommendations`     | GET    | Get recommendations                 |
+| `/coach/clients/:id/workout-analyses/:analysisId`         | GET    | View single analysis                |
+| `/coach/clients/:id/workout-analyses/:analysisId/approve` | POST   | Approve analysis                    |
+| `/coach/clients/:id/workout-analyses/:analysisId/reject`  | POST   | Reject analysis                     |
+| `/coach/clients/:id/workout-analyses/:analysisId/assign`  | POST   | Assign to client                    |
+
+---
+
+### Coach — Workout Plans
+
+| Endpoint                      | Method | Description                               |
+| ----------------------------- | ------ | ----------------------------------------- |
+| `/workout-plans`              | GET    | List all plans (filter by client, status) |
+| `/workout-plans/saved`        | GET    | Library of saved (unassigned) plans       |
+| `/workout-plans`              | POST   | Create workout plan                       |
+| `/workout-plans/import`       | POST   | Import from XLSX/XLS/CSV file             |
+| `/workout-plans/import-drive` | POST   | Import from Google Drive URL              |
+| `/workout-plans/:id`          | GET    | Get single plan                           |
+| `/workout-plans/:id`          | PUT    | Update plan                               |
+| `/workout-plans/:id`          | DELETE | Delete plan                               |
+| `/workout-plans/:id/assign`   | POST   | Assign plan to one or more clients        |
+
+**Excel/CSV import required columns** (case-insensitive): `client_name`, `week_start`, `day`, `exercise`, `sets`, `reps`. Optional: `rest`, `notes`.
+
+---
+
+### Coach — Nutrition Plans
+
+| Endpoint                      | Method | Description           |
+| ----------------------------- | ------ | --------------------- |
+| `/nutrition-plans`            | GET    | List nutrition plans  |
+| `/nutrition-plans`            | POST   | Create nutrition plan |
+| `/nutrition-plans/:id`        | GET    | Get single plan       |
+| `/nutrition-plans/:id`        | PUT    | Update plan           |
+| `/nutrition-plans/:id`        | DELETE | Delete plan           |
+| `/nutrition-plans/:id/assign` | POST   | Assign to clients     |
+
+---
+
+### Coach — Check-ins
+
+| Endpoint        | Method | Description                       |
+| --------------- | ------ | --------------------------------- |
+| `/checkins`     | GET    | List check-ins (filter by client) |
+| `/checkins`     | POST   | Schedule check-in meeting         |
+| `/checkins/:id` | PUT    | Update meeting details            |
+| `/checkins/:id` | DELETE | Cancel / delete meeting           |
+
+---
+
+### Coach — Messages
+
+| Endpoint                     | Method | Description                        |
+| ---------------------------- | ------ | ---------------------------------- |
+| `/messages/unread`           | GET    | All unread message threads         |
+| `/messages/unread-count`     | GET    | Total unread message count         |
+| `/messages/read-all`         | POST   | Mark all messages as read          |
+| `/messages/:clientId`        | GET    | Message thread with client         |
+| `/messages/:clientId/typing` | GET    | Client typing status               |
+| `/messages/:clientId/typing` | POST   | Update coach typing status         |
+| `/messages`                  | POST   | Send message to client             |
+| `/messages/upload-media`     | POST   | Upload message media (returns URL) |
+
+---
+
+### Coach — Live Training
+
+| Endpoint                          | Method | Description                    |
+| --------------------------------- | ------ | ------------------------------ |
+| `/live-training`                  | GET    | List live training sessions    |
+| `/live-training`                  | POST   | Create session                 |
+| `/live-training/:id`              | GET    | Get session details            |
+| `/live-training/:id`              | PUT    | Update session                 |
+| `/live-training/:id`              | DELETE | Delete session                 |
+| `/live-training/:id/go-live`      | POST   | Start / go live                |
+| `/live-training/:id/end`          | POST   | End session                    |
+| `/live-training/:id/requests`     | GET    | List join requests             |
+| `/live-training/:id/requests`     | POST   | Approve / deny join request    |
+| `/live-training/:id/participants` | GET    | Current participant list       |
+| `/live-training/:id/chat`         | GET    | Live session chat              |
+| `/live-training/:id/chat`         | POST   | Send live session chat message |
+
+---
+
+### Coach — Coaching Sessions (1-on-1)
+
+| Endpoint                        | Method | Description                              |
+| ------------------------------- | ------ | ---------------------------------------- |
+| `/coaching-sessions`            | GET    | List sessions (filter by client, status) |
+| `/coaching-sessions`            | POST   | Create session                           |
+| `/coaching-sessions/:id`        | GET    | Get session details                      |
+| `/coaching-sessions/:id`        | PUT    | Update session                           |
+| `/coaching-sessions/:id`        | DELETE | Delete session                           |
+| `/coaching-sessions/:id/status` | POST   | Update session status                    |
+| `/coaching-sessions/:id/token`  | POST   | Get LiveKit room token (coach)           |
+| `/coaching-sessions/:id/notes`  | POST   | Save session notes                       |
+
+---
+
+### Coach — Analytics
+
+| Endpoint              | Method | Description                     |
+| --------------------- | ------ | ------------------------------- |
+| `/analytics/coach`    | GET    | Aggregate coach-level analytics |
+| `/analytics/sessions` | GET    | Coaching session analytics      |
+
+---
+
+### Coach — Notifications
+
+| Endpoint                      | Method | Description               |
+| ----------------------------- | ------ | ------------------------- |
+| `/notifications`              | GET    | List coach notifications  |
+| `/notifications/unread-count` | GET    | Unread notification count |
+| `/notifications/:id/read`     | POST   | Mark single as read       |
+| `/notifications/read-all`     | POST   | Mark all as read          |
+| `/notifications/:id`          | DELETE | Delete notification       |
+
+---
+
+### Coach — Settings
+
+| Endpoint                 | Method | Description                     |
+| ------------------------ | ------ | ------------------------------- |
+| `/integrations/settings` | GET    | Get webhook URL + API key       |
+| `/integrations/settings` | PUT    | Update webhook URL + API key    |
+| `/notification-settings` | GET    | Get notification preferences    |
+| `/notification-settings` | PUT    | Update notification preferences |
+| `/support/contact`       | POST   | Submit support ticket           |
+
+---
+
+### Subscriptions & Billing
+
+| Endpoint                              | Method | Auth  | Description                         |
+| ------------------------------------- | ------ | ----- | ----------------------------------- |
+| `/subscription/select-plan`           | POST   | Setup | Select plan after registration      |
+| `/subscription`                       | GET    | Coach | Current subscription + tier         |
+| `/subscription/checkout`              | POST   | Coach | Create Stripe checkout session      |
+| `/subscription/upgrade`               | POST   | Coach | Upgrade / change plan immediately   |
+| `/subscription/portal`                | POST   | Coach | Open Stripe billing portal          |
+| `/subscription/cancel`                | POST   | Coach | Cancel at period end                |
+| `/subscription/invoices`              | GET    | Coach | List all invoices                   |
+| `/subscription/invoices/:id/download` | GET    | Coach | Download / hosted invoice URL       |
+| `/subscription/webhook`               | POST   | —     | Stripe webhook (signature verified) |
+| `/payment-methods`                    | GET    | Coach | List saved payment methods          |
+| `/payment-methods`                    | POST   | Coach | Attach new payment method           |
+| `/payment-methods/setup-intent`       | POST   | Coach | Create Stripe SetupIntent           |
+| `/payment-methods/:id`                | DELETE | Coach | Detach payment method               |
+| `/payment-methods/:id/default`        | POST   | Coach | Set as default payment method       |
+
+---
+
+### Coach — Media
+
+| Endpoint                 | Method | Description                       |
+| ------------------------ | ------ | --------------------------------- |
+| `/coach/media/:clientId` | GET    | List all media uploads for client |
+
+---
+
+### Client Routes
+
+| Endpoint                                       | Method | Description                      |
+| ---------------------------------------------- | ------ | -------------------------------- |
+| `/client/profile`                              | GET    | Get own profile                  |
+| `/client/profile`                              | PUT    | Update profile fields            |
+| `/client/profile/photo`                        | PUT    | Update profile photo URL         |
+| `/client/fcm-token`                            | POST   | Register / update FCM push token |
+| `/client/workout-plan/current`                 | GET    | Current assigned workout plan    |
+| `/client/workout-plan/history`                 | GET    | Past workout plans               |
+| `/client/group-workout-plans`                  | GET    | Assigned group workout plans     |
+| `/client/workout-logs`                         | POST   | Log completed workout            |
+| `/client/workout-logs/:id`                     | PUT    | Update workout log               |
+| `/client/workout-logs/:id/media`               | POST   | Attach media to workout log      |
+| `/client/nutrition-plan`                       | GET    | Current nutrition plan           |
+| `/client/checkins`                             | GET    | Upcoming check-in meetings       |
+| `/client/checkins/:id/respond`                 | POST   | Accept / decline check-in        |
+| `/client/checkins/:id/reschedule`              | POST   | Request reschedule               |
+| `/client/messages`                             | GET    | Message thread with coach        |
+| `/client/messages`                             | POST   | Send message to coach            |
+| `/client/messages/typing`                      | GET    | Coach typing status              |
+| `/client/messages/typing`                      | POST   | Update client typing status      |
+| `/client/messages/upload-media`                | POST   | Upload message media             |
+| `/client/group-workout-plans/:planId/messages` | GET    | Group chat messages              |
+| `/client/group-workout-plans/:planId/messages` | POST   | Send group chat message          |
+| `/client/media`                                | GET    | Own media uploads                |
+| `/client/media/upload`                         | POST   | Upload media file                |
+| `/media/presigned-url`                         | POST   | Get presigned S3 upload URL      |
+| `/client/live-training`                        | GET    | Available live training sessions |
+| `/client/live-training/:id`                    | GET    | Session details                  |
+| `/client/live-training/:id/join`               | POST   | Request to join session          |
+| `/client/live-training/:id/participants`       | GET    | Participant list                 |
+| `/client/live-training/:id/chat`               | GET    | Live chat messages               |
+| `/client/live-training/:id/chat`               | POST   | Send live chat message           |
+| `/client/coaching-sessions`                    | GET    | Upcoming 1-on-1 sessions         |
+| `/client/coaching-sessions/:id`                | GET    | Session details                  |
+| `/client/coaching-sessions/:id/token`          | POST   | Get LiveKit room token (client)  |
+| `/client/analytics`                            | GET    | Own progress analytics           |
+| `/client/notifications`                        | GET    | List notifications               |
+| `/client/notifications/unread-count`           | GET    | Unread count                     |
+| `/client/notifications/:id/read`               | POST   | Mark single as read              |
+| `/client/notifications/read-all`               | POST   | Mark all as read                 |
+
+---
+
+## Subscription Tiers
+
+| Tier       | Client Limit |
+| ---------- | ------------ |
+| `free`     | 3            |
+| `pro`      | 50           |
+| `business` | Unlimited    |
 
 ---
 
 ## Cron Jobs
 
 ```bash
-# Send scheduled push notifications / reminders every minute
+# Send scheduled push notification reminders every minute
 * * * * * cd /path/to/backend && php scripts/send-reminders.php >> /dev/null 2>&1
 ```
 

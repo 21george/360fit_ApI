@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Config\Database;
-use App\Helpers\{Request, Response};
+use App\Helpers\{Request, Response, ScopedCollection, Diff};
 use App\Services\{CodeService, EmailService, NotificationTriggerService};
 use App\Controllers\SubscriptionController;
 use MongoDB\BSON\ObjectId;
@@ -15,7 +15,8 @@ class ClientController
     public function clientProfile(array $params): void
     {
         $clientId = new ObjectId($params['_auth']['sub']);
-        $client = Database::collection('clients')->findOne([
+        // RLS automatically scopes by _id for client role
+        $client = ScopedCollection::for('clients')->findOne([
             '_id' => $clientId,
             'active' => true,
         ], ['projection' => ['login_code_hash' => 0]]);
@@ -38,24 +39,29 @@ class ClientController
             }
         }
 
-        // Get client before update for comparison
-        $clientBefore = Database::collection('clients')->findOne(['_id' => $clientId, 'active' => true]);
+        // RLS: client role scopes by _id; coach role by coach_id
+        $clientsCol = ScopedCollection::for('clients');
 
-        Database::collection('clients')->updateOne(
+        // Get client before update for comparison
+        $clientBefore = $clientsCol->findOne(['_id' => $clientId, 'active' => true]);
+
+        $clientsCol->updateOne(
             ['_id' => $clientId, 'active' => true],
             ['$set' => $set]
         );
 
-        $client = Database::collection('clients')->findOne([
+        $client = $clientsCol->findOne([
             '_id' => $clientId,
             'active' => true,
         ], ['projection' => ['login_code_hash' => 0]]);
 
         if (!$client) Response::error('Client not found', 404);
 
-        // Notify coach of profile update
-        $changedFields = array_intersect_key($set, array_flip($allowed));
-        unset($changedFields['updated_at']);
+        // Notify coach of profile update — but only for fields that ACTUALLY
+        // changed compared to the pre-update record. Without this, a client
+        // re-submitting unchanged values (e.g. on a form reload) would
+        // generate a spurious "profile updated" notification.
+        $changedFields = Diff::changedFields($body, $clientBefore, $allowed);
         if (!empty($changedFields) && $clientBefore) {
             $triggerService = new NotificationTriggerService();
             $triggerService->notifyProfileUpdated(
@@ -141,11 +147,10 @@ class ClientController
     // GET /coach/clients
     public function index(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
         $search   = Request::get('search', '');
         $page     = max(1, (int) Request::get('page', 1));
         $perPage  = 20;
-        $filter   = ['coach_id' => $coachId];
+        $filter   = [];
 
         // Show active clients AND blocked clients, but hide soft-deleted ones.
         // Blocked clients have is_blocked=true; deleted clients have active=false AND is_blocked=false.
@@ -166,22 +171,21 @@ class ClientController
                 ]],
             ];
         } else {
-            $filter = array_merge($filter, $visibility);
+            $filter = $visibility;
         }
 
         // Support sort parameter: e.g. sort=name_asc or sort=created_at_desc
         $sortParam = Request::get('sort', 'created_at_desc');
         $sort = ['created_at' => -1];
-        if ($sortParam) {
-            $parts = explode('_', $sortParam);
-            $direction = array_pop($parts);
-            $field = implode('_', $parts);
-            if (in_array($field, ['name', 'email', 'created_at', 'updated_at']) && in_array($direction, ['asc', 'desc'])) {
-                $sort = [$field => $direction === 'asc' ? 1 : -1];
-            }
+        $parts = explode('_', $sortParam);
+        $direction = array_pop($parts);
+        $field = implode('_', $parts);
+        if (in_array($field, ['name', 'email', 'created_at', 'updated_at']) && in_array($direction, ['asc', 'desc'])) {
+            $sort = [$field => $direction === 'asc' ? 1 : -1];
         }
 
-        $col   = Database::collection('clients');
+        // RLS automatically scopes by coach_id for coach role
+        $col   = ScopedCollection::for('clients');
         $total = $col->countDocuments($filter);
         $docs  = $col->find($filter, [
             'skip'       => ($page - 1) * $perPage,
@@ -206,13 +210,13 @@ class ClientController
         $errors  = Request::validate($body, ['name' => 'required|min:2']);
         if ($errors) Response::error('Validation failed', 422, $errors);
 
-        $col = Database::collection('clients');
+        $col = ScopedCollection::for('clients');
 
         // Use subscription tier limit
         $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
         $tier  = $coach['subscription_tier'] ?? 'free';
         $cap   = SubscriptionController::getClientLimit($tier);
-        $count = $col->countDocuments(['coach_id' => $coachId, 'active' => true]);
+        $count = $col->countDocuments(['active' => true]);
         if ($count >= $cap) {
             Response::error("Client limit of {$cap} reached. Upgrade your plan to add more clients.", 403);
         }
@@ -221,48 +225,38 @@ class ClientController
         $codeHash  = CodeService::hash($code);
         $codeLookup = CodeService::lookupHash($code);
 
-        $result = $col->insertOne([
-            'coach_id'          => $coachId,
-            'name'              => $body['name'],
-            'email'             => $body['email'] ?? null,
-            'phone'             => $body['phone'] ?? null,
-            'language'          => $body['language'] ?? 'en',
-            'address'           => $body['address'] ?? null,
-            'city'              => $body['city'] ?? null,
-            'postal_code'       => $body['postal_code'] ?? null,
-            'nationality'       => $body['nationality'] ?? null,
-            'occupation'        => $body['occupation'] ?? null,
-            'gender'            => $body['gender'] ?? null,
-            'date_of_birth'     => $body['date_of_birth'] ?? null,
-            'current_weight_kg' => isset($body['current_weight_kg']) ? (float) $body['current_weight_kg'] : null,
-            'height_cm'         => isset($body['height_cm']) ? (float) $body['height_cm'] : null,
-            'chest_cm'          => isset($body['chest_cm']) ? (float) $body['chest_cm'] : null,
-            'waist_cm'          => isset($body['waist_cm']) ? (float) $body['waist_cm'] : null,
-            'body_fat_pct'      => isset($body['body_fat_pct']) ? (float) $body['body_fat_pct'] : null,
-            'bmi'               => isset($body['bmi']) ? (float) $body['bmi'] : null,
-            'lean_mass_kg'      => isset($body['lean_mass_kg']) ? (float) $body['lean_mass_kg'] : null,
-            'sickness'          => $body['sickness'] ?? null,
-            'age'               => isset($body['age']) ? (int) $body['age'] : null,
-            'weight'            => isset($body['weight']) ? (float) $body['weight'] : null,
-            'location'          => $body['location'] ?? null,
-            'login_code_hash'   => $codeHash,
-            'code_lookup'       => $codeLookup,
-            'active'            => true,
-            'is_blocked'        => false,
-            'token_version'     => 0,
-            'fcm_token'         => null,
+        $doc = [
+            'coach_id'        => $coachId,
+            'name'            => $body['name'],
+            'login_code_hash' => $codeHash,
+            'code_lookup'     => $codeLookup,
+            'active'          => true,
+            'is_blocked'      => false,
+            'token_version'   => 0,
+            'fcm_token'       => null,
             'profile_photo_url' => null,
-            'notes'             => $body['notes'] ?? null,
-            'created_at'        => new \MongoDB\BSON\UTCDateTime(),
-            'updated_at'        => new \MongoDB\BSON\UTCDateTime(),
-        ]);
+            'created_at'      => new \MongoDB\BSON\UTCDateTime(),
+            'updated_at'      => new \MongoDB\BSON\UTCDateTime(),
+        ];
+
+        $nullables = ['email','phone','address','city','postal_code','nationality','occupation','gender','date_of_birth','sickness','location','notes'];
+        foreach ($nullables as $f) {
+            $doc[$f] = $body[$f] ?? null;
+        }
+        $doc['language'] = $body['language'] ?? 'en';
+
+        $floats = ['current_weight_kg','height_cm','chest_cm','waist_cm','body_fat_pct','bmi','lean_mass_kg','weight'];
+        foreach ($floats as $f) {
+            $doc[$f] = isset($body[$f]) ? (float) $body[$f] : null;
+        }
+        $doc['age'] = isset($body['age']) ? (int) $body['age'] : null;
+
+        $result = $col->insertOne($doc);
 
         // Send login code email if client has email
         $emailSent = false;
         if (!empty($body['email'])) {
-            $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
-            $coachName = $coach['name'] ?? 'Your Coach';
-            $emailSent = EmailService::sendClientLoginCode($body['email'], $body['name'], $coachName, $code);
+            $emailSent = EmailService::sendClientLoginCode($body['email'], $body['name'], $coach['name'] ?? 'Your Coach', $code);
         }
 
         Response::success([
@@ -294,13 +288,21 @@ class ClientController
             }
         }
 
-        Database::collection('clients')->updateOne(['_id' => $client['_id']], ['$set' => $set]);
+        ScopedCollection::for('clients')->updateOne(['_id' => $client['_id']], ['$set' => $set]);
 
-        $updated = Database::collection('clients')->findOne(
+        $updated = ScopedCollection::for('clients')->findOne(
             ['_id' => $client['_id']],
             ['projection' => ['login_code_hash' => 0]]
         );
-        Response::success($this->format($updated), 'Client updated');
+
+        // Compute changed fields for the response so the frontend can
+        // show "X fields updated" honestly. This is the coach-side
+        // counterpart to updateClientProfile's $changedFields used for
+        // the "profile updated" notification.
+        $changedFields = Diff::changedFields($body, $client, $allowed);
+        $payload = $this->format($updated);
+        $payload['changed_fields'] = $changedFields;
+        Response::success($payload, 'Client updated');
     }
 
     // DELETE /coach/clients/:id
@@ -310,7 +312,7 @@ class ClientController
 
         $currentVersion = ($client['token_version'] ?? 0) + 1;
 
-        Database::collection('clients')->updateOne(
+        ScopedCollection::for('clients')->updateOne(
             ['_id' => $client['_id']],
             ['$set' => [
                 'active'        => false,
@@ -326,11 +328,10 @@ class ClientController
     public function uploadClientPhoto(array $params): void
     {
         $clientId = new ObjectId($params['id']);
-        $coachId  = new ObjectId($params['_auth']['sub']);
 
-        $client = Database::collection('clients')->findOne([
-            '_id'      => $clientId,
-            'coach_id' => $coachId,
+        // RLS automatically scopes by coach_id for coach role
+        $client = ScopedCollection::for('clients')->findOne([
+            '_id' => $clientId,
         ]);
         if (!$client) Response::error('Client not found', 404);
 
@@ -379,7 +380,6 @@ class ClientController
             if (empty($_FILES['photo']['tmp_name'])) {
                 Response::error('No photo file provided', 422);
             }
-            $file    = $_FILES['photo'];
             $relPath = "uploads/clients/{$clientId}";
             $dir     = BASE_PATH . '/public/' . $relPath;
             if (!is_dir($dir)) mkdir($dir, 0755, true);
@@ -387,7 +387,7 @@ class ClientController
             $filename = "{$uuid}.{$ext}";
             $dest     = "{$dir}/{$filename}";
 
-            if (!move_uploaded_file($file['tmp_name'], $dest)) {
+            if (!move_uploaded_file($_FILES['photo']['tmp_name'], $dest)) {
                 Response::error('Failed to save photo', 500);
             }
 
@@ -416,17 +416,20 @@ class ClientController
         $client = $this->findClient($params, includeBlocked: true);
         $clientId = $client['_id'];
 
-        // Cascade delete related collections
-        Database::collection('workout_plans')->deleteMany(['client_id' => $clientId]);
-        Database::collection('workout_logs')->deleteMany(['client_id' => $clientId]);
-        Database::collection('body_measurements')->deleteMany(['client_id' => $clientId]);
-        Database::collection('media_uploads')->deleteMany(['client_id' => $clientId]);
-        Database::collection('messages')->deleteMany(['client_id' => $clientId]);
-        Database::collection('checkin_meetings')->deleteMany(['client_id' => $clientId]);
-        Database::collection('coaching_sessions')->deleteMany(['client_id' => $clientId]);
-        Database::collection('notifications')->deleteMany(['client_id' => $clientId]);
+        // Cascade delete related collections.
+        // Ownership is enforced by findClient() above (RLS-scoped by
+        // coach_id): the $client['_id'] we get back is guaranteed to
+        // belong to the requesting coach, so filtering the cascade
+        // by client_id is safe. The deleteMany calls bypass the RLS
+        // wrapper on purpose — these are destructive admin operations
+        // and the wrapper would also inject a coach_id filter for
+        // some of these collections, which is a no-op here because
+        // the client already belongs to this coach.
+        foreach (['workout_plans','workout_logs','body_measurements','media_uploads','messages','checkin_meetings','coaching_sessions','notifications'] as $coll) {
+            Database::collection($coll)->deleteMany(['client_id' => $clientId]);
+        }
 
-        Database::collection('clients')->deleteOne(['_id' => $clientId]);
+        ScopedCollection::for('clients')->deleteOne(['_id' => $clientId]);
         Response::success(null, 'Client permanently deleted');
     }
 
@@ -434,26 +437,23 @@ class ClientController
     public function block(array $params): void
     {
         $clientId = new ObjectId($params['id']);
-        $coachId  = new ObjectId($params['_auth']['sub']);
 
-        // Find client even if already blocked (don't require active=true)
-        $client = Database::collection('clients')->findOne([
-            '_id'      => $clientId,
-            'coach_id' => $coachId,
+        // RLS: coach role scopes by coach_id
+        $client = ScopedCollection::for('clients')->findOne([
+            '_id' => $clientId,
         ], ['projection' => ['login_code_hash' => 0]]);
 
         if (!$client) Response::error('Client not found', 404);
 
         // Increment token_version to invalidate all existing tokens
-        $currentVersion = $client['token_version'] ?? 0;
-        $newVersion     = $currentVersion + 1;
+        $newVersion = ($client['token_version'] ?? 0) + 1;
 
         // Generate new login code to invalidate old access codes
         $code       = CodeService::generate();
         $codeHash   = CodeService::hash($code);
         $codeLookup = CodeService::lookupHash($code);
 
-        Database::collection('clients')->updateOne(
+        ScopedCollection::for('clients')->updateOne(
             ['_id' => $client['_id']],
             ['$set' => [
                 'is_blocked'    => true,
@@ -471,17 +471,15 @@ class ClientController
     public function unblock(array $params): void
     {
         $clientId = new ObjectId($params['id']);
-        $coachId  = new ObjectId($params['_auth']['sub']);
 
-        // Find client even if blocked (don't require active=true)
-        $client = Database::collection('clients')->findOne([
-            '_id'      => $clientId,
-            'coach_id' => $coachId,
+        // RLS: coach role scopes by coach_id
+        $client = ScopedCollection::for('clients')->findOne([
+            '_id' => $clientId,
         ], ['projection' => ['login_code_hash' => 0]]);
 
         if (!$client) Response::error('Client not found', 404);
 
-        Database::collection('clients')->updateOne(
+        ScopedCollection::for('clients')->updateOne(
             ['_id' => $client['_id']],
             ['$set' => [
                 'is_blocked' => false,
@@ -500,7 +498,7 @@ class ClientController
         $codeHash = CodeService::hash($code);
         $codeLookup = CodeService::lookupHash($code);
 
-        Database::collection('clients')->updateOne(
+        ScopedCollection::for('clients')->updateOne(
             ['_id' => $client['_id']],
             ['$set' => ['login_code_hash' => $codeHash, 'code_lookup' => $codeLookup, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
         );
@@ -624,38 +622,28 @@ class ClientController
             $email = !empty($row['email']) ? trim((string) $row['email']) : null;
 
             $doc = [
-                'coach_id'         => $coachId,
-                'name'             => $name,
-                'email'            => $email,
-                'phone'            => !empty($row['phone']) ? trim((string) $row['phone']) : null,
-                'age'              => !empty($row['age']) ? (int) $row['age'] : null,
-                'location'         => !empty($row['location']) ? trim((string) $row['location']) : null,
-                'city'             => !empty($row['city']) ? trim((string) $row['city']) : null,
-                'weight'           => !empty($row['weight']) ? (float) $row['weight'] : null,
-                'height'           => !empty($row['height']) ? (float) $row['height'] : null,
-                'gender'           => !empty($row['gender']) ? trim((string) $row['gender']) : null,
-                'date_of_birth'    => !empty($row['date_of_birth']) ? trim((string) $row['date_of_birth']) : null,
-                'current_weight_kg'=> !empty($row['current_weight_kg']) ? (float) $row['current_weight_kg'] : null,
-                'height_cm'        => !empty($row['height_cm']) ? (float) $row['height_cm'] : null,
-                'chest_cm'         => !empty($row['chest_cm']) ? (float) $row['chest_cm'] : null,
-                'waist_cm'         => !empty($row['waist_cm']) ? (float) $row['waist_cm'] : null,
-                'body_fat_pct'     => !empty($row['body_fat_pct']) ? (float) $row['body_fat_pct'] : null,
-                'bmi'              => !empty($row['bmi']) ? (float) $row['bmi'] : null,
-                'lean_mass_kg'     => !empty($row['lean_mass_kg']) ? (float) $row['lean_mass_kg'] : null,
-                'sickness'         => !empty($row['sickness']) ? trim((string) $row['sickness']) : null,
-                'nationality'      => !empty($row['nationality']) ? trim((string) $row['nationality']) : null,
-                'occupation'       => !empty($row['occupation']) ? trim((string) $row['occupation']) : null,
-                'postal_code'      => !empty($row['postal_code']) ? trim((string) $row['postal_code']) : null,
-                'address'          => !empty($row['address']) ? trim((string) $row['address']) : null,
-                'language'         => !empty($row['language']) ? trim((string) $row['language']) : 'en',
-                'notes'            => !empty($row['notes']) ? trim((string) $row['notes']) : null,
-                'login_code_hash'  => $codeHash,
-                'code_lookup'      => $codeLookup,
-                'active'           => true,
-                'is_blocked'       => false,
-                'created_at'       => new \MongoDB\BSON\UTCDateTime(),
-                'updated_at'       => new \MongoDB\BSON\UTCDateTime(),
+                'coach_id'        => $coachId,
+                'name'            => $name,
+                'email'           => $email,
+                'login_code_hash' => $codeHash,
+                'code_lookup'     => $codeLookup,
+                'active'          => true,
+                'is_blocked'      => false,
+                'created_at'      => new \MongoDB\BSON\UTCDateTime(),
+                'updated_at'      => new \MongoDB\BSON\UTCDateTime(),
             ];
+
+            $strings = ['phone','location','city','gender','date_of_birth','sickness','nationality','occupation','postal_code','address','language','notes'];
+            foreach ($strings as $f) {
+                $doc[$f] = !empty($row[$f]) ? trim((string) $row[$f]) : null;
+            }
+            $doc['language'] = !empty($row['language']) ? trim((string) $row['language']) : 'en';
+
+            $floats = ['weight','height','current_weight_kg','height_cm','chest_cm','waist_cm','body_fat_pct','bmi','lean_mass_kg'];
+            foreach ($floats as $f) {
+                $doc[$f] = !empty($row[$f]) ? (float) $row[$f] : null;
+            }
+            $doc['age'] = !empty($row['age']) ? (int) $row['age'] : null;
 
             $result  = Database::collection('clients')->insertOne($doc);
             $clientId = (string) $result->getInsertedId();
@@ -682,7 +670,7 @@ class ClientController
         }
 
         $emailsSent    = count(array_filter($loginCodes, fn($c) => $c['email_sent']));
-        $emailsSkipped = count(array_filter($loginCodes, fn($c) => !$c['email_sent'] && $c['email'] === null));
+        $emailsSkipped = count(array_filter($loginCodes, fn($c) => $c['email'] === null));
 
         Response::success([
             'created'        => $created,
@@ -697,16 +685,13 @@ class ClientController
 
     private function findClient(array $params, bool $includeBlocked = false): object
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
         $clientId = new ObjectId($params['id']);
-        $filter   = [
-            '_id'      => $clientId,
-            'coach_id' => $coachId,
-        ];
+        $filter   = ['_id' => $clientId];
         if (!$includeBlocked) {
             $filter['active'] = true;
         }
-        $client = Database::collection('clients')->findOne($filter, ['projection' => ['login_code_hash' => 0]]);
+        // RLS automatically adds coach_id filter for coach role
+        $client = ScopedCollection::for('clients')->findOne($filter, ['projection' => ['login_code_hash' => 0]]);
 
         if (!$client) {
             Response::error('Client not found', 404);
@@ -716,36 +701,16 @@ class ClientController
 
     private function format(object $doc): array
     {
-        return [
-            'id'                => (string) $doc['_id'],
-            'name'              => $doc['name'],
-            'email'             => $doc['email'] ?? null,
-            'phone'             => $doc['phone'] ?? null,
-            'language'          => $doc['language'] ?? 'en',
-            'address'           => $doc['address'] ?? null,
-            'city'              => $doc['city'] ?? null,
-            'postal_code'       => $doc['postal_code'] ?? null,
-            'nationality'       => $doc['nationality'] ?? null,
-            'occupation'        => $doc['occupation'] ?? null,
-            'gender'            => $doc['gender'] ?? null,
-            'date_of_birth'     => $doc['date_of_birth'] ?? null,
-            'current_weight_kg' => $doc['current_weight_kg'] ?? null,
-            'height_cm'         => $doc['height_cm'] ?? null,
-            'chest_cm'          => $doc['chest_cm'] ?? null,
-            'waist_cm'          => $doc['waist_cm'] ?? null,
-            'body_fat_pct'      => $doc['body_fat_pct'] ?? null,
-            'bmi'               => $doc['bmi'] ?? null,
-            'lean_mass_kg'      => $doc['lean_mass_kg'] ?? null,
-            'sickness'          => $doc['sickness'] ?? null,
-            'age'               => $doc['age'] ?? null,
-            'weight'            => $doc['weight'] ?? null,
-            'location'          => $doc['location'] ?? null,
-            'profile_photo_url' => $doc['profile_photo_url'] ?? null,
-            'notes'             => $doc['notes'] ?? null,
-            'active'            => $doc['active'],
-            'is_blocked'        => $doc['is_blocked'] ?? false,
-            'created_at'        => isset($doc['created_at']) ? (string) $doc['created_at'] : null,
-            'updated_at'        => isset($doc['updated_at']) ? (string) $doc['updated_at'] : null,
-        ];
+        $fields = ['email','phone','address','city','postal_code','nationality','occupation','gender','date_of_birth','current_weight_kg','height_cm','chest_cm','waist_cm','body_fat_pct','bmi','lean_mass_kg','sickness','age','weight','location','profile_photo_url','notes'];
+        $out = ['id' => (string) $doc['_id'], 'name' => $doc['name']];
+        foreach ($fields as $f) {
+            $out[$f] = $doc[$f] ?? null;
+        }
+        $out['language'] = $doc['language'] ?? 'en';
+        $out['active']   = $doc['active'];
+        $out['is_blocked'] = $doc['is_blocked'] ?? false;
+        $out['created_at'] = isset($doc['created_at']) ? (string) $doc['created_at'] : null;
+        $out['updated_at'] = isset($doc['updated_at']) ? (string) $doc['updated_at'] : null;
+        return $out;
     }
 }

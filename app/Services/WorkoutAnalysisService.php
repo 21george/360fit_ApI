@@ -35,7 +35,6 @@ class WorkoutAnalysisService
         }
 
         $ninetyDaysAgo = new UTCDateTime((new \DateTime('-90 days'))->getTimestamp() * 1000);
-        $thirtyDaysAgo = new UTCDateTime((new \DateTime('-30 days'))->getTimestamp() * 1000);
 
         $logs = Database::collection('workout_logs')->find([
             'client_id' => $clientObjId,
@@ -85,7 +84,6 @@ class WorkoutAnalysisService
     ): array {
         $totalVolume = 0.0;
         $totalSets = 0;
-        $totalReps = 0;
         $workoutCount = 0;
         $weeklyVolume = [];
         $exerciseMaxKg = [];
@@ -111,7 +109,6 @@ class WorkoutAnalysisService
                     $reps = (int) ($set['reps_done'] ?? $set['reps'] ?? 0);
                     $totalVolume += $kg * $reps;
                     $totalSets++;
-                    $totalReps += $reps;
                     $daySets++;
 
                     $name = $exercise['name'] ?? '';
@@ -166,9 +163,6 @@ class WorkoutAnalysisService
             }
         }
         foreach ($last30dMax as $name => $max30d) {
-            $priorMax = $allTimeMax[$name] ?? 0.0;
-            // If the 30d max is greater than what existed before 30d ago, it's a PR
-            // We approximate by checking if 30d max == all-time max (meaning PR happened in 30d)
             if ($max30d > 0 && $max30d >= ($allTimeMax[$name] ?? 0.0)) {
                 $prCount30d++;
             }

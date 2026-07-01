@@ -82,13 +82,11 @@ class LiveTrainingController
         ]);
 
         // Schedule 2-hour reminder for coach and participants
-        $triggerService = new NotificationTriggerService();
-        $scheduledAt = date('Y-m-d H:i:s', $timestamp);
-        $triggerService->scheduleLiveSessionReminder(
+        (new NotificationTriggerService())->scheduleLiveSessionReminder(
             (string) $result->getInsertedId(),
             (string) $coachId,
             trim($body['title']),
-            $scheduledAt,
+            date('Y-m-d H:i:s', $timestamp),
             [] // Will be populated when participants join
         );
 
@@ -183,7 +181,7 @@ class LiveTrainingController
         $filter = ['session_id' => $session['_id']];
         if ($status && in_array($status, self::REQ_STATES, true)) $filter['status'] = $status;
 
-        $requests = (array) Database::collection('live_training_requests')
+        $requests = Database::collection('live_training_requests')
             ->find($filter, ['sort' => ['created_at' => -1]])
             ->toArray();
 
@@ -195,7 +193,7 @@ class LiveTrainingController
             foreach ($cursor as $c) $clients[(string) $c['_id']] = $c;
         }
 
-        $formatted = array_values(array_map(function ($r) use ($clients) {
+        $formatted = array_map(function ($r) use ($clients) {
             $cid = (string) $r['client_id'];
             $client = $clients[$cid] ?? null;
             return [
@@ -207,7 +205,7 @@ class LiveTrainingController
                 'status'       => $r['status'] ?? 'pending',
                 'created_at'   => isset($r['created_at']) ? date('c', intdiv((int) ((string) $r['created_at']), 1000)) : null,
             ];
-        }, $requests));
+        }, $requests);
 
         Response::success($formatted);
     }
@@ -261,15 +259,15 @@ class LiveTrainingController
         $pids = (array) ($session['participant_ids'] ?? []);
         if (empty($pids)) { Response::success([]); }
 
-        $clients = (array) Database::collection('clients')
+        $clients = Database::collection('clients')
             ->find(['_id' => ['$in' => array_values($pids)]])
             ->toArray();
 
-        $formatted = array_values(array_map(fn($c) => [
+        $formatted = array_map(fn($c) => [
             'id'    => (string) $c['_id'],
             'name'  => $c['name'] ?? 'Client',
             'photo' => $c['profile_photo_url'] ?? null,
-        ], $clients));
+        ], $clients);
 
         Response::success($formatted);
     }
@@ -303,7 +301,7 @@ class LiveTrainingController
         $coachId = new ObjectId($params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
 
-        $messages = (array) Database::collection('live_training_chat')
+        $messages = Database::collection('live_training_chat')
             ->find(['session_id' => $session['_id']], ['sort' => ['sent_at' => 1]])
             ->toArray();
 
@@ -367,7 +365,7 @@ class LiveTrainingController
         if (!$session) Response::error('Session not found', 404);
 
         $pids = (array) ($session['participant_ids'] ?? []);
-        if (empty($pids)) { Response::success([]); return; }
+        if (empty($pids)) { Response::success([]); }
 
         $clients = Database::collection('clients')
             ->find(['_id' => ['$in' => array_values($pids)]])
@@ -377,7 +375,7 @@ class LiveTrainingController
             'id'    => (string) $c['_id'],
             'name'  => $c['name'] ?? 'Client',
             'photo' => $c['profile_photo_url'] ?? null,
-        ], (array) $clients);
+        ], $clients);
 
         Response::success($formatted);
     }
@@ -549,7 +547,7 @@ class LiveTrainingController
             Response::error('Not a participant', 403);
         }
 
-        $messages = (array) Database::collection('live_training_chat')
+        $messages = Database::collection('live_training_chat')
             ->find(['session_id' => $sessionId], ['sort' => ['sent_at' => 1]])
             ->toArray();
 

@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Config\Database;
-use App\Helpers\{Request, Response};
+use App\Helpers\{Request, Response, ScopedCollection};
 use App\Services\{ExcelImportService, FcmService, NotificationTriggerService};
 use MongoDB\BSON\ObjectId;
 
@@ -210,10 +210,10 @@ class WorkoutPlanController
             }
         }
 
-        Database::collection('workout_plans')->updateOne(['_id' => $plan['_id']], ['$set' => $set]);
+        ScopedCollection::for('workout_plans')->updateOne(['_id' => $plan['_id']], ['$set' => $set]);
 
         // Fetch the updated plan to ensure notifications use the latest data
-        $updatedPlan = Database::collection('workout_plans')->findOne(['_id' => $plan['_id']]);
+        $updatedPlan = ScopedCollection::for('workout_plans')->findOne(['_id' => $plan['_id']]);
 
         // Notify assigned client(s) that the plan was updated
         $triggerService = new NotificationTriggerService();
@@ -245,7 +245,7 @@ class WorkoutPlanController
     public function destroy(array $params): void
     {
         $plan = $this->findPlan($params);
-        Database::collection('workout_plans')->deleteOne(['_id' => $plan['_id']]);
+        ScopedCollection::for('workout_plans')->deleteOne(['_id' => $plan['_id']]);
         Response::success(null, 'Plan deleted');
     }
 
@@ -262,10 +262,9 @@ class WorkoutPlanController
 
         $body = Request::body();
 
-        // Find plan
-        $plan = Database::collection('workout_plans')->findOne([
-            '_id'      => $planId,
-            'coach_id' => $coachId,
+        // Find plan — RLS automatically scopes by coach_id for coach role
+        $plan = ScopedCollection::for('workout_plans')->findOne([
+            '_id' => $planId,
         ]);
         if (!$plan) {
             Response::error('Plan not found or access denied', 404);
@@ -356,13 +355,12 @@ class WorkoutPlanController
     // GET /workout-plans/saved — List saved (unassigned/draft) plans
     public function savedPlans(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
         $page    = max(1, (int) Request::get('page', 1));
         $perPage = 20;
 
-        $col    = Database::collection('workout_plans');
+        // RLS: coach role automatically adds coach_id filter
+        $col    = ScopedCollection::for('workout_plans');
         $filter = [
-            'coach_id' => $coachId,
             '$and' => [
                 ['$or' => [
                     ['client_id' => null],
@@ -562,15 +560,14 @@ class WorkoutPlanController
 
     private function findPlan(array $params): object
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
         try {
             $planId = new ObjectId($params['id']);
         } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
             Response::error('Invalid plan ID', 400);
         }
-        $plan    = Database::collection('workout_plans')->findOne([
-            '_id'      => $planId,
-            'coach_id' => $coachId,
+        // RLS: coach role scopes by coach_id (workout_plans ownership map)
+        $plan = ScopedCollection::for('workout_plans')->findOne([
+            '_id' => $planId,
         ]);
         if (!$plan) Response::error('Plan not found', 404);
         return $plan;

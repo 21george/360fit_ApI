@@ -8,7 +8,6 @@ use League\Route\Router;
 
 $coachAuth  = new AuthMiddleware(['coach']);
 $clientAuth = new AuthMiddleware(['client']);
-$anyAuth    = new AuthMiddleware(['coach', 'client']);
 
 $ctrl = new ClientController();
 

@@ -4,7 +4,6 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Config\Database;
-use MongoDB\BSON\ObjectId;
 use MongoDB\BSON\UTCDateTime;
 
 /**
@@ -28,7 +27,7 @@ class ScheduledNotificationService
         if ($this->scheduledCollection === null) {
             try {
                 $this->scheduledCollection = Database::getInstance()->getCollection('scheduled_notifications');
-            } catch (\Throwable $e) {
+            } catch (\Throwable) {
                 return null;
             }
         }

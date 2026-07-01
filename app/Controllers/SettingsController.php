@@ -149,9 +149,8 @@ class SettingsController
         if (!$coach) Response::error('Coach not found', 404);
 
         $rawSubject = trim($body['subject']);
-        $rawMessage = trim($body['message']);
         $subject    = htmlspecialchars($rawSubject, ENT_QUOTES, 'UTF-8');
-        $message    = htmlspecialchars($rawMessage, ENT_QUOTES, 'UTF-8');
+        $message    = htmlspecialchars(trim($body['message']), ENT_QUOTES, 'UTF-8');
         $name       = htmlspecialchars((string) ($coach['name'] ?? 'Unknown'), ENT_QUOTES, 'UTF-8');
         $email      = (string) ($coach['email'] ?? '');
 

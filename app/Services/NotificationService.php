@@ -60,7 +60,7 @@ class NotificationService {
             ]);
             curl_exec($ch);
             curl_close($ch);
-        } catch (\Exception $e) {
+        } catch (\Exception) {
             // Log silently
         }
     }

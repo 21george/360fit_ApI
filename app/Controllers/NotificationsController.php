@@ -17,9 +17,8 @@ class NotificationsController
     {
         try {
             $clientId = new ObjectId($params['_auth']['sub']);
-        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
-            return;
         }
 
         $collection = Database::collection('notifications');
@@ -59,9 +58,8 @@ class NotificationsController
     {
         try {
             $clientId   = new ObjectId($params['_auth']['sub']);
-        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
-            return;
         }
 
         $collection = Database::collection('notifications');
@@ -83,9 +81,8 @@ class NotificationsController
         try {
             $clientId       = new ObjectId($params['_auth']['sub']);
             $notificationId = new ObjectId($params['id']);
-        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid ID', 400);
-            return;
         }
 
         $collection     = Database::collection('notifications');
@@ -98,7 +95,6 @@ class NotificationsController
 
         if (!$notification) {
             Response::error('Notification not found', 404);
-            return;
         }
 
         $collection->updateOne(
@@ -116,9 +112,8 @@ class NotificationsController
     {
         try {
             $clientId   = new ObjectId($params['_auth']['sub']);
-        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
-            return;
         }
 
         $collection = Database::collection('notifications');
@@ -139,9 +134,8 @@ class NotificationsController
     {
         try {
             $coachId = new ObjectId($params['_auth']['sub']);
-        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
-            return;
         }
 
         $collection = Database::collection('notifications');
@@ -182,9 +176,8 @@ class NotificationsController
     {
         try {
             $coachId = new ObjectId($params['_auth']['sub']);
-        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
-            return;
         }
 
         $collection = Database::collection('notifications');
@@ -205,9 +198,8 @@ class NotificationsController
     {
         try {
             $coachId = new ObjectId($params['_auth']['sub']);
-        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
-            return;
         }
 
         $notificationId = new ObjectId($params['id']);
@@ -220,7 +212,6 @@ class NotificationsController
 
         if (!$notification) {
             Response::error('Notification not found', 404);
-            return;
         }
 
         $collection->updateOne(
@@ -239,9 +230,8 @@ class NotificationsController
     {
         try {
             $coachId = new ObjectId($params['_auth']['sub']);
-        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
-            return;
         }
 
         $collection = Database::collection('notifications');
@@ -262,9 +252,8 @@ class NotificationsController
     {
         try {
             $coachId = new ObjectId($params['_auth']['sub']);
-        } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
+        } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
-            return;
         }
 
         $notificationId = new ObjectId($params['id']);
@@ -277,7 +266,6 @@ class NotificationsController
 
         if ($result->getDeletedCount() === 0) {
             Response::error('Notification not found', 404);
-            return;
         }
 
         Response::success(null, 'Notification deleted');

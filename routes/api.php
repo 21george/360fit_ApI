@@ -20,7 +20,7 @@ use App\Controllers\{
     SettingsController,
     NotificationsController
 };
-use App\Middleware\{AuthMiddleware, CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SubscriptionMiddleware, SetupAuthMiddleware};
+use App\Middleware\{CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SubscriptionMiddleware, SetupAuthMiddleware};
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 $router->get('/health', function () {

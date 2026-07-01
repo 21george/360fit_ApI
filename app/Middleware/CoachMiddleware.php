@@ -30,5 +30,13 @@ class CoachMiddleware extends AuthMiddleware
         }
 
         $params['_coach'] = $coach;
+
+        // Set request context for RLS
+        \App\Helpers\RequestContext::setAuth([
+            'sub'  => (string) $params['_auth']['sub'],
+            'role' => 'coach',
+            'name' => $coach['name'] ?? null,
+            'email' => $coach['email'] ?? null,
+        ]);
     }
 }

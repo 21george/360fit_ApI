@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Config\Database;
-use App\Helpers\{Request, Response};
+use App\Helpers\{Request, Response, ScopedCollection};
 use App\Services\{FcmService, NotificationTriggerService};
 use MongoDB\BSON\{ObjectId, UTCDateTime};
 
@@ -15,12 +15,12 @@ class CheckinController
     // GET /checkins (coach)
     public function index(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
         $clientId = Request::get('client_id');
-        $filter   = ['coach_id' => $coachId];
+        $filter   = [];
         if ($clientId) $filter['client_id'] = new ObjectId($clientId);
 
-        $meetings = Database::collection('checkin_meetings')->find($filter, [
+        // RLS: coach role scopes by coach_id; client role by client_id
+        $meetings = ScopedCollection::for('checkin_meetings')->find($filter, [
             'sort' => ['scheduled_at' => 1],
         ])->toArray();
 
@@ -40,10 +40,12 @@ class CheckinController
         if ($errors) Response::error('Validation failed', 422, $errors);
 
         $clientId = new ObjectId($body['client_id']);
-        $client   = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
+        // RLS: coach role scopes clients by coach_id
+        $client = ScopedCollection::for('clients')->findOne(['_id' => $clientId]);
         if (!$client) Response::error('Client not found', 404);
 
-        $result = Database::collection('checkin_meetings')->insertOne([
+        // RLS: auto-sets coach_id for coach role
+        $result = ScopedCollection::for('checkin_meetings')->insertOne([
             'coach_id'     => $coachId,
             'client_id'    => $clientId,
             'scheduled_at' => new \MongoDB\BSON\UTCDateTime(strtotime($body['scheduled_at']) * 1000),
@@ -80,9 +82,9 @@ class CheckinController
     // PUT /checkins/:id
     public function update(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
         $mtgId   = new ObjectId($params['id']);
-        $meeting = Database::collection('checkin_meetings')->findOne(['_id' => $mtgId, 'coach_id' => $coachId]);
+        // RLS: coach role scopes by coach_id; client role by client_id
+        $meeting = ScopedCollection::for('checkin_meetings')->findOne(['_id' => $mtgId]);
         if (!$meeting) Response::error('Meeting not found', 404);
 
         $body    = Request::body();
@@ -108,7 +110,7 @@ class CheckinController
         }
 
         if (!empty($set)) {
-            Database::collection('checkin_meetings')->updateOne(['_id' => $mtgId], ['$set' => $set]);
+            ScopedCollection::for('checkin_meetings')->updateOne(['_id' => $mtgId], ['$set' => $set]);
         }
 
         Response::success(null, 'Meeting updated');
@@ -117,20 +119,20 @@ class CheckinController
     // DELETE /checkins/:id
     public function destroy(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
         $mtgId   = new ObjectId($params['id']);
-        $meeting = Database::collection('checkin_meetings')->findOne(['_id' => $mtgId, 'coach_id' => $coachId]);
+        // RLS: coach role scopes by coach_id; client role by client_id
+        $meeting = ScopedCollection::for('checkin_meetings')->findOne(['_id' => $mtgId]);
         if (!$meeting) Response::error('Meeting not found', 404);
-        Database::collection('checkin_meetings')->deleteOne(['_id' => $mtgId]);
+        ScopedCollection::for('checkin_meetings')->deleteOne(['_id' => $mtgId]);
         Response::success(null, 'Meeting cancelled');
     }
 
     // GET /client/checkins (client)
     public function clientCheckins(array $params): void
     {
-        $clientId = new ObjectId($params['_auth']['sub']);
-        $meetings = Database::collection('checkin_meetings')->find(
-            ['client_id' => $clientId, 'status' => 'scheduled'],
+        // RLS: client role automatically scopes by client_id
+        $meetings = ScopedCollection::for('checkin_meetings')->find(
+            ['status' => 'scheduled'],
             ['sort' => ['scheduled_at' => 1]]
         )->toArray();
         Response::success(array_map(fn($m) => $this->format($m), $meetings));
@@ -139,7 +141,6 @@ class CheckinController
     // POST /client/checkins/:id/respond
     public function respond(array $params): void
     {
-        $clientId = new ObjectId($params['_auth']['sub']);
         $meetingId = new ObjectId($params['id']);
         $body = Request::body();
         $response = $body['client_response'] ?? null;
@@ -148,15 +149,15 @@ class CheckinController
             Response::error('Validation failed', 422, ['client_response' => ['Must be accepted or declined']]);
         }
 
-        $meeting = Database::collection('checkin_meetings')->findOne([
+        // RLS: client role scopes by client_id; coach role by coach_id
+        $meeting = ScopedCollection::for('checkin_meetings')->findOne([
             '_id' => $meetingId,
-            'client_id' => $clientId,
             'status' => 'scheduled',
         ]);
 
         if (!$meeting) Response::error('Meeting not found', 404);
 
-        Database::collection('checkin_meetings')->updateOne(
+        ScopedCollection::for('checkin_meetings')->updateOne(
             ['_id' => $meetingId],
             ['$set' => [
                 'client_response' => $response,
@@ -167,7 +168,7 @@ class CheckinController
             ]]
         );
 
-        $updatedMeeting = Database::collection('checkin_meetings')->findOne(['_id' => $meetingId]);
+        $updatedMeeting = ScopedCollection::for('checkin_meetings')->findOne(['_id' => $meetingId]);
         if (!$updatedMeeting) Response::error('Meeting not found', 404);
 
         Response::success($this->format($updatedMeeting), 'Check-in response saved');
@@ -176,7 +177,6 @@ class CheckinController
     // POST /client/checkins/:id/reschedule
     public function reschedule(array $params): void
     {
-        $clientId = new ObjectId($params['_auth']['sub']);
         $meetingId = new ObjectId($params['id']);
         $body = Request::body();
         $errors = Request::validate($body, ['proposed_scheduled_at' => 'required']);
@@ -187,15 +187,15 @@ class CheckinController
             Response::error('Validation failed', 422, ['proposed_scheduled_at' => ['Invalid date']]);
         }
 
-        $meeting = Database::collection('checkin_meetings')->findOne([
+        // RLS: client role scopes by client_id; coach role by coach_id
+        $meeting = ScopedCollection::for('checkin_meetings')->findOne([
             '_id' => $meetingId,
-            'client_id' => $clientId,
             'status' => 'scheduled',
         ]);
 
         if (!$meeting) Response::error('Meeting not found', 404);
 
-        Database::collection('checkin_meetings')->updateOne(
+        ScopedCollection::for('checkin_meetings')->updateOne(
             ['_id' => $meetingId],
             ['$set' => [
                 'client_response' => 'reschedule_requested',
@@ -206,7 +206,7 @@ class CheckinController
             ]]
         );
 
-        $updatedMeeting = Database::collection('checkin_meetings')->findOne(['_id' => $meetingId]);
+        $updatedMeeting = ScopedCollection::for('checkin_meetings')->findOne(['_id' => $meetingId]);
         if (!$updatedMeeting) Response::error('Meeting not found', 404);
 
         Response::success($this->format($updatedMeeting), 'Reschedule requested');

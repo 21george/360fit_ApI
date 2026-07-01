@@ -1,8 +1,10 @@
 <?php
+declare(strict_types=1);
+
 namespace App\Controllers;
 
 use App\Config\Database;
-use App\Helpers\{Request, Response};
+use App\Helpers\{Request, Response, Diff};
 use MongoDB\BSON\ObjectId;
 use MongoDB\BSON\UTCDateTime;
 
@@ -16,20 +18,8 @@ class CoachController {
         if (!$coach) Response::notFound('Coach not found');
 
         $data = $this->format($coach);
-
-        // Compute actual client count from the database (stale cached value is unreliable)
         $data['client_count'] = $this->getClientCount((string) $coach['_id']);
-
-        // Generate fresh photo URL from stored key
-        if (!empty($coach['profile_photo_key'])) {
-            $key = (string) $coach['profile_photo_key'];
-            if (str_starts_with($key, 'local:')) {
-                $appUrl = rtrim($_ENV['APP_URL'] ?? 'http://localhost:8000', '/');
-                $data['profile_photo'] = $appUrl . '/' . substr($key, 6);
-            } elseif (\App\Services\S3Service::isConfigured()) {
-                $data['profile_photo'] = \App\Services\S3Service::getPresignedDownloadUrl($key, 1440);
-            }
-        }
+        $data = $this->resolveProfilePhoto($data, $coach);
 
         Response::success($data);
     }
@@ -79,56 +69,59 @@ class CoachController {
             Response::error('Password update is not allowed here. Use /coach/profile/password', 422);
         }
 
+        $coachIdObj = new ObjectId($params['_auth']['sub']);
+
+        // Capture the pre-update record so we can compute which fields
+        // actually changed. Used both for the response (so the frontend
+        // can show honest "X fields updated" feedback) and for any
+        // future "coach profile updated" notification trigger.
+        $coachBefore = Database::collection('coaches')->findOne(['_id' => $coachIdObj]);
+
         $update['updated_at'] = new UTCDateTime();
         Database::collection('coaches')->updateOne(
-            ['_id' => new ObjectId($params['_auth']['sub'])],
+            ['_id' => $coachIdObj],
             ['$set' => $update]
         );
 
-        // Return the updated coach so the frontend can refresh
         $updated = Database::collection('coaches')->findOne(
-            ['_id' => new ObjectId($params['_auth']['sub'])],
+            ['_id' => $coachIdObj],
             ['projection' => ['password_hash' => 0]]
         );
         $data = $this->format($updated);
-
-        // Compute actual client count from the database (stale cached value is unreliable)
         $data['client_count'] = $this->getClientCount((string) $updated['_id']);
+        $data = $this->resolveProfilePhoto($data, $updated);
 
-        if (!empty($updated['profile_photo_key'])) {
-            $key = (string) $updated['profile_photo_key'];
-            if (str_starts_with($key, 'local:')) {
-                $appUrl = rtrim($_ENV['APP_URL'] ?? 'http://localhost:8000', '/');
-                $data['profile_photo'] = $appUrl . '/' . substr($key, 6);
-            } elseif (\App\Services\S3Service::isConfigured()) {
-                $data['profile_photo'] = \App\Services\S3Service::getPresignedDownloadUrl($key, 1440);
-            }
-        }
+        // Field-level diff: only fields present in BOTH the body and
+        // the allowed list are considered, and only when the value
+        // actually differs from the pre-update record. social_media
+        // is included as a single field — its sub-document is
+        // compared via canonical JSON inside Diff::valuesEqual.
+        // updated_at is excluded: it is server-set and would always
+        // register as a "change" against the pre-update record.
+        $diffKeys = array_keys($update);
+        $diffKeys = array_values(array_filter(
+            $diffKeys,
+            fn(string $k): bool => $k !== 'updated_at',
+        ));
+        $data['changed_fields'] = Diff::changedFields($update, $coachBefore, $diffKeys);
         Response::success($data, 'Profile updated');
     }
 
     public function uploadPhoto(array $params): void {
-        $coachId = $params['_auth']['sub'];
-        $ext     = (string) Request::get('ext', 'jpg');
-        $allowed = ['jpg', 'jpeg', 'png', 'webp'];
+        $coachId    = $params['_auth']['sub'];
+        $coachIdObj = new ObjectId($coachId);
+        $ext        = (string) Request::get('ext', 'jpg');
+        $allowed    = ['jpg', 'jpeg', 'png', 'webp'];
         if (!in_array(strtolower($ext), $allowed)) {
             Response::error('Invalid file type. Allowed: jpg, jpeg, png, webp', 422);
         }
 
         // Delete old photo first
         $coach = Database::collection('coaches')->findOne(
-            ['_id' => new ObjectId($coachId)],
+            ['_id' => $coachIdObj],
             ['projection' => ['profile_photo_key' => 1]]
         );
-        if (!empty($coach['profile_photo_key'])) {
-            $oldKey = (string) $coach['profile_photo_key'];
-            if (str_starts_with($oldKey, 'local:')) {
-                $oldPath = BASE_PATH . '/public/' . substr($oldKey, 6);
-                if (is_file($oldPath)) @unlink($oldPath);
-            } elseif (\App\Services\S3Service::isConfigured()) {
-                \App\Services\S3Service::delete($oldKey);
-            }
-        }
+        $this->deletePhotoByKey($coach['profile_photo_key'] ?? null);
 
         $uuid = bin2hex(random_bytes(8));
 
@@ -142,7 +135,7 @@ class CoachController {
             $readUrl   = \App\Services\S3Service::getPresignedDownloadUrl($key, 1440);
 
             Database::collection('coaches')->updateOne(
-                ['_id' => new ObjectId($coachId)],
+                ['_id' => $coachIdObj],
                 ['$set' => [
                     'profile_photo'     => $readUrl,
                     'profile_photo_key' => $key,
@@ -160,7 +153,6 @@ class CoachController {
             if (empty($_FILES['photo']['tmp_name'])) {
                 Response::error('No photo file provided', 422);
             }
-            $file    = $_FILES['photo'];
             $relPath = "uploads/coaches/{$coachId}";
             $dir     = BASE_PATH . '/public/' . $relPath;
             if (!is_dir($dir)) mkdir($dir, 0755, true);
@@ -168,7 +160,7 @@ class CoachController {
             $filename = "{$uuid}.{$ext}";
             $dest     = "{$dir}/{$filename}";
 
-            if (!move_uploaded_file($file['tmp_name'], $dest)) {
+            if (!move_uploaded_file($_FILES['photo']['tmp_name'], $dest)) {
                 Response::error('Failed to save photo', 500);
             }
 
@@ -177,7 +169,7 @@ class CoachController {
             $localKey = "local:{$relPath}/{$filename}";
 
             Database::collection('coaches')->updateOne(
-                ['_id' => new ObjectId($coachId)],
+                ['_id' => $coachIdObj],
                 ['$set' => [
                     'profile_photo'     => $photoUrl,
                     'profile_photo_key' => $localKey,
@@ -192,24 +184,17 @@ class CoachController {
     }
 
     public function deletePhoto(array $params): void {
-        $coachId = $params['_auth']['sub'];
-        $coach   = Database::collection('coaches')->findOne(
-            ['_id' => new ObjectId($coachId)],
+        $coachId    = $params['_auth']['sub'];
+        $coachIdObj = new ObjectId($coachId);
+        $coach      = Database::collection('coaches')->findOne(
+            ['_id' => $coachIdObj],
             ['projection' => ['profile_photo_key' => 1]]
         );
 
-        if (!empty($coach['profile_photo_key'])) {
-            $key = (string) $coach['profile_photo_key'];
-            if (str_starts_with($key, 'local:')) {
-                $path = BASE_PATH . '/public/' . substr($key, 6);
-                if (is_file($path)) @unlink($path);
-            } elseif (\App\Services\S3Service::isConfigured()) {
-                \App\Services\S3Service::delete($key);
-            }
-        }
+        $this->deletePhotoByKey($coach['profile_photo_key'] ?? null);
 
         Database::collection('coaches')->updateOne(
-            ['_id' => new ObjectId($coachId)],
+            ['_id' => $coachIdObj],
             ['$set' => ['profile_photo' => null, 'profile_photo_key' => null, 'updated_at' => new UTCDateTime()]]
         );
 
@@ -250,8 +235,9 @@ class CoachController {
     }
 
     public function changePassword(array $params): void {
-        $body    = Request::body();
-        $coachId = $params['_auth']['sub'];
+        $body       = Request::body();
+        $coachId    = $params['_auth']['sub'];
+        $coachIdObj = new ObjectId($coachId);
 
         if (empty($body['current_password']) || empty($body['new_password'])) {
             Response::error('Current password and new password are required', 422);
@@ -261,7 +247,7 @@ class CoachController {
         }
 
         $coach = Database::collection('coaches')->findOne(
-            ['_id' => new ObjectId($coachId)],
+            ['_id' => $coachIdObj],
             ['projection' => ['password_hash' => 1]]
         );
 
@@ -270,7 +256,7 @@ class CoachController {
         }
 
         Database::collection('coaches')->updateOne(
-            ['_id' => new ObjectId($coachId)],
+            ['_id' => $coachIdObj],
             ['$set' => [
                 'password_hash' => password_hash($body['new_password'], PASSWORD_BCRYPT, ['cost' => 12]),
                 'updated_at'    => new UTCDateTime(),
@@ -278,6 +264,31 @@ class CoachController {
         );
 
         Response::success(null, 'Password changed successfully');
+    }
+
+    private function resolveProfilePhoto(array $data, $record): array
+    {
+        if (!empty($record['profile_photo_key'])) {
+            $key = (string) $record['profile_photo_key'];
+            if (str_starts_with($key, 'local:')) {
+                $appUrl = rtrim($_ENV['APP_URL'] ?? 'http://localhost:8000', '/');
+                $data['profile_photo'] = $appUrl . '/' . substr($key, 6);
+            } elseif (\App\Services\S3Service::isConfigured()) {
+                $data['profile_photo'] = \App\Services\S3Service::getPresignedDownloadUrl($key, 1440);
+            }
+        }
+        return $data;
+    }
+
+    private function deletePhotoByKey(?string $key): void
+    {
+        if (!$key) return;
+        if (str_starts_with($key, 'local:')) {
+            $path = BASE_PATH . '/public/' . substr($key, 6);
+            if (is_file($path)) @unlink($path);
+        } elseif (\App\Services\S3Service::isConfigured()) {
+            \App\Services\S3Service::delete($key);
+        }
     }
 
     private function getClientCount(string $coachId): int {

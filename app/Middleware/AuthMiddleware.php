@@ -25,7 +25,7 @@ class AuthMiddleware
             $decoded = JWT::decode($token, new Key($secret, 'HS256'));
             // Inject auth data into params so controllers can access it
             $params['_auth'] = (array) $decoded;
-        } catch (\Exception $e) {
+        } catch (\Exception) {
             Response::error('Unauthorized', 401);
         }
     }

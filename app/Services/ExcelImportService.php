@@ -179,9 +179,9 @@ class ExcelImportService
             $exercise = [
                 'exercise_id'    => new ObjectId(),
                 'name'           => $exerciseName,
-                'sets'           => $this->parseIntOrDefault($data['sets'] ?? null, 3),
+                'sets'           => $this->parseIntOrDefault($data['sets'], 3),
                 'reps'           => (string) ($data['reps'] ?? '10'),
-                'rest_seconds'   => $this->parseIntOrDefault($data['rest_seconds'] ?? null, 60),
+                'rest_seconds'   => $this->parseIntOrDefault($data['rest_seconds'], 60),
                 'notes'          => isset($data['notes']) && $data['notes'] !== '' ? $data['notes'] : null,
                 'demo_video_url' => null,
                 'order'          => $exerciseOrder,
