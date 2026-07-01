@@ -15,9 +15,10 @@ namespace App\Helpers;
  * Behavior contract:
  *   - null and the empty string are DISTINCT (a "field explicitly
  *     cleared" change is a real change).
- *   - numeric strings and their numeric counterparts are EQUAL
- *     ("85" === 85, 1.0 === 1).
- *   - booleans are NOT coerced to strings.
+ *   - numeric strings and their numeric counterparts are EQUAL,
+ *     but only if the string is fully numeric ('100' === 100,
+ *     '1.0' === 1, '1e2' === 100). '100foo' !== 100.
+ *   - booleans are NOT coerced to strings or numbers.
  *   - arrays (e.g. sub-documents like social_media) are compared
  *     by JSON canonicalization so order-independent equality holds.
  *   - if the pre-update record is null (not found), returns []
@@ -71,14 +72,23 @@ final class Diff
             return false;
         }
 
-        // Non-null mismatch: coerce via string for type-tolerant
-        // comparison. ("85" === 85) holds, (1.0 === 1) holds,
-        // (true !== "1") — bools stringify to "" / "1" inconsistently
-        // across drivers so we treat them as strict.
+        // Booleans: never coerce. ("1" !== true, "" !== false).
         if (is_bool($a) || is_bool($b)) {
             return false;
         }
-        return (string) $a === (string) $b;
+
+        // Numeric canonicalization: treat int/float/numeric-string
+        // as equal if they represent the same value. We do this
+        // explicitly (not via string cast) so '1e2' === 100 and
+        // '1.0' === 1 hold WITHOUT also matching '100foo' or
+        // '1abc', and without depending on PHP locale.
+        if (is_int($a) || is_float($a) || is_int($b) || is_float($b)) {
+            if (!is_numeric($a) || !is_numeric($b)) return false;
+            return (float) $a === (float) $b;
+        }
+
+        // Two non-numeric, non-bool strings: strict equality.
+        return $a === $b;
     }
 
     /**

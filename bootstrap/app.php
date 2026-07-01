@@ -67,13 +67,23 @@ set_exception_handler(function (Throwable $e) {
     if (php_sapi_name() !== 'cli-server') {
         error_log('Stack trace: ' . $e->getTraceAsString());
     }
-    
+
     // Log to file for debugging
     $logFile = BASE_PATH . '/storage/logs/error.log';
     if (is_writable(dirname($logFile))) {
         file_put_contents($logFile, date('Y-m-d H:i:s') . ' - ' . $errorMsg . PHP_EOL, FILE_APPEND);
     }
-    
+
+    // Bad inputs from the client should be 4xx, not 5xx. Map the
+    // Mongo and JSON-parse exceptions to 400 so a malformed id or
+    // body never looks like a server failure.
+    if ($e instanceof \MongoDB\Driver\Exception\InvalidArgumentException
+        || $e instanceof \JsonException
+        || ($e instanceof \UnexpectedValueException && str_contains($e->getMessage(), 'ObjectId'))
+    ) {
+        Response::json(['error' => 'Invalid request: ' . $e->getMessage()], 400);
+    }
+
     Response::json(['error' => 'Internal server error'], 500);
 });
 
@@ -81,4 +91,12 @@ set_exception_handler(function (Throwable $e) {
 $router = new Router();
 $router->setPrefix('/v1');
 require BASE_PATH . '/routes/api.php';
-$router->dispatch();
+
+// RequestContext is process-wide static state; reset it on every
+// request boundary (success OR failure) so PHP-FPM workers can't
+// leak authenticated context between requests.
+try {
+    $router->dispatch();
+} finally {
+    \App\Helpers\RequestContext::clear();
+}

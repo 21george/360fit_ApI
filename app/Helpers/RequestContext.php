@@ -5,8 +5,13 @@ declare(strict_types=1);
 namespace App\Helpers;
 
 /**
- * Stores the authenticated user context for the current request.
- * Set by CoachMiddleware / ClientMiddleware after JWT validation.
+ * Per-request authenticated user context.
+ *
+ * Populated by CoachMiddleware / ClientMiddleware after JWT validation
+ * and read by RlsScope / ScopedCollection. State is process-wide static
+ * by design (PHP request model), but bootstrap/app.php guarantees a
+ * clear() after every dispatch so PHP-FPM workers cannot leak state
+ * between requests.
  */
 class RequestContext
 {
@@ -30,6 +35,11 @@ class RequestContext
     public static function getUserId(): ?string
     {
         return self::$auth['sub'] ?? null;
+    }
+
+    public static function getCoachId(): ?string
+    {
+        return self::$auth['coach_id'] ?? null;
     }
 
     public static function clear(): void

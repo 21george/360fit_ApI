@@ -16,20 +16,24 @@ class RlsScope
      * Collection → ownership field mapping.
      * Key: collection name
      * Value: [
-     *   'coach' => field name OR callable that returns filter array,
-     *   'client' => field name OR callable that returns filter array,
+     *   'coach' => field name OR callable(ObjectId $userId): array,
+     *   'client' => field name OR callable(ObjectId $userId): array,
      * ]
+     *
+     * Callables are used where a single field doesn't capture the access
+     * rule (e.g. a plan may be assigned to a client by `client_id` OR
+     * by inclusion in `client_ids`).
      */
     private const OWNERSHIP_MAP = [
         /* ── Coach-owned resources ───────────────────────────────────────── */
         'clients'              => ['coach' => 'coach_id',           'client' => '_id'],
-        'workout_plans'        => ['coach' => 'coach_id',           'client' => null], // complex: client_id OR client_ids
+        'workout_plans'        => ['coach' => 'coach_id',           'client' => [self::class, 'workoutPlansClientFilter']],
         'nutrition_plans'      => ['coach' => 'coach_id',           'client' => 'client_id'],
         'checkin_meetings'     => ['coach' => 'coach_id',           'client' => 'client_id'],
         'coaching_sessions'    => ['coach' => 'coach_id',           'client' => 'client_id'],
-        'live_training_sessions' => ['coach' => 'coach_id',       'client' => null],
+        'live_training_sessions' => ['coach' => 'coach_id',         'client' => [self::class, 'liveTrainingClientFilter']],
 
-        /* ── Client-owned resources ──────────────────────────────────────── */
+        /* ── Client-owned resources (coach has no direct access) ─────────── */
         'workout_logs'         => ['coach' => null,                 'client' => 'client_id'],
         'body_measurements'    => ['coach' => null,                 'client' => 'client_id'],
         'media_uploads'        => ['coach' => null,                 'client' => 'client_id'],
@@ -44,16 +48,11 @@ class RlsScope
     ];
 
     /**
-     * Return the ownership filter for a collection and role.
-     * Returns null if the role has no access to this collection
-     * or if no RLS is configured (allow manual filtering).
-     *
-     * If the JWT 'sub' is not a valid ObjectId string (which would
-     * only happen with a forged or malformed token — the JWT decode
-     * itself does not validate ObjectId format), we return null
-     * ownership rather than letting an InvalidArgumentException
-     * propagate to a 500. Callers will fall through to whatever
-     * application-level filters they have already applied.
+     * Ownership filter for ($collection, current role), or null when:
+     *   - no role/userId in context,
+     *   - collection or role has no RLS entry, or
+     *   - the JWT 'sub' is not a valid ObjectId (malformed/forged —
+     *     we fall through to the caller's manual filter rather than 500).
      */
     public static function ownershipFilter(string $collection): ?array
     {
@@ -98,6 +97,43 @@ class RlsScope
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    /**
+     * Client-role filter for `workout_plans`: a plan is visible to a
+     * client if they are the primary `client_id` OR they appear in the
+     * `client_ids` group array.
+     */
+    public static function workoutPlansClientFilter(ObjectId $userId): array
+    {
+        return [
+            '$or' => [
+                ['client_id'  => $userId],
+                ['client_ids' => ['$in' => [$userId]]],
+            ],
+        ];
+    }
+
+    /**
+     * Client-role filter for `live_training_sessions`: a client sees
+     * sessions hosted by their own coach. The coach_id is read from
+     * RequestContext (populated by ClientMiddleware from the JWT
+     * lookup). If it is missing, return a filter that matches
+     * nothing rather than leaking all sessions.
+     */
+    public static function liveTrainingClientFilter(ObjectId $userId): array
+    {
+        $coachId = RequestContext::getCoachId();
+        if ($coachId) {
+            try {
+                return ['coach_id' => new ObjectId($coachId)];
+            } catch (\Throwable) {
+                // fall through to safe fallback
+            }
+        }
+        // ObjectId(24×'0') is reserved (all-zero); no real document
+        // will ever match, so this safely returns an empty result.
+        return ['_id' => new ObjectId('000000000000000000000000')];
     }
 
     /**

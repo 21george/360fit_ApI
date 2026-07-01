@@ -415,6 +415,10 @@ class ClientController
     {
         $client = $this->findClient($params, includeBlocked: true);
         $clientId = $client['_id'];
+        // Defensive: capture the client owner at the top so the
+        // cascade is pinned to this coach even if findClient()'s
+        // internal filter is later loosened (e.g. an admin mode).
+        $coachId = $client['coach_id'] ?? null;
 
         // Cascade delete related collections.
         // Ownership is enforced by findClient() above (RLS-scoped by
@@ -424,9 +428,16 @@ class ClientController
         // wrapper on purpose — these are destructive admin operations
         // and the wrapper would also inject a coach_id filter for
         // some of these collections, which is a no-op here because
-        // the client already belongs to this coach.
+        // the client already belongs to this coach. We still add
+        // coach_id as a defensive secondary filter on every cascade
+        // row so a future refactor of findClient() cannot silently
+        // widen the blast radius of a delete.
         foreach (['workout_plans','workout_logs','body_measurements','media_uploads','messages','checkin_meetings','coaching_sessions','notifications'] as $coll) {
-            Database::collection($coll)->deleteMany(['client_id' => $clientId]);
+            $filter = ['client_id' => $clientId];
+            if ($coachId !== null) {
+                $filter['coach_id'] = $coachId;
+            }
+            Database::collection($coll)->deleteMany($filter);
         }
 
         ScopedCollection::for('clients')->deleteOne(['_id' => $clientId]);

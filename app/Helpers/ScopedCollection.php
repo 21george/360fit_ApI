@@ -80,10 +80,12 @@ class ScopedCollection
     {
         $ownership = RlsScope::ownershipFilter($this->name);
         if ($ownership !== null && is_array($document)) {
+            // Unconditionally stamp ownership from the authenticated
+            // context. This is derived from the JWT, never from the
+            // request body, so overwriting is safe and prevents a
+            // caller from spoofing ownership via a pre-set field.
             foreach ($ownership as $field => $value) {
-                if (!isset($document[$field])) {
-                    $document[$field] = $value;
-                }
+                $document[$field] = $value;
             }
         }
         return $this->collection->insertOne($document, $options);
@@ -95,13 +97,15 @@ class ScopedCollection
         if ($ownership !== null) {
             foreach ($documents as &$doc) {
                 if (is_array($doc)) {
+                    // Same rationale as insertOne: ownership is
+                    // derived from auth context, always stamp it.
                     foreach ($ownership as $field => $value) {
-                        if (!isset($doc[$field])) {
-                            $doc[$field] = $value;
-                        }
+                        $doc[$field] = $value;
                     }
                 }
             }
+            // Break the reference once the loop is done so the
+            // last $doc doesn't leak into the next caller.
             unset($doc);
         }
         return $this->collection->insertMany($documents, $options);

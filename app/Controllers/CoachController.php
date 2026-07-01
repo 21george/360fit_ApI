@@ -4,14 +4,14 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Config\Database;
-use App\Helpers\{Request, Response, Diff};
+use App\Helpers\{Request, Response, Diff, ScopedCollection};
 use MongoDB\BSON\ObjectId;
 use MongoDB\BSON\UTCDateTime;
 
 class CoachController {
 
     public function me(array $params): void {
-        $coach = Database::collection('coaches')->findOne(
+        $coach = ScopedCollection::for('coaches')->findOne(
             ['_id' => new ObjectId($params['_auth']['sub'])],
             ['projection' => ['password_hash' => 0]]
         );
@@ -75,15 +75,15 @@ class CoachController {
         // actually changed. Used both for the response (so the frontend
         // can show honest "X fields updated" feedback) and for any
         // future "coach profile updated" notification trigger.
-        $coachBefore = Database::collection('coaches')->findOne(['_id' => $coachIdObj]);
+        $coachBefore = ScopedCollection::for('coaches')->findOne(['_id' => $coachIdObj]);
 
         $update['updated_at'] = new UTCDateTime();
-        Database::collection('coaches')->updateOne(
+        ScopedCollection::for('coaches')->updateOne(
             ['_id' => $coachIdObj],
             ['$set' => $update]
         );
 
-        $updated = Database::collection('coaches')->findOne(
+        $updated = ScopedCollection::for('coaches')->findOne(
             ['_id' => $coachIdObj],
             ['projection' => ['password_hash' => 0]]
         );
@@ -117,7 +117,7 @@ class CoachController {
         }
 
         // Delete old photo first
-        $coach = Database::collection('coaches')->findOne(
+        $coach = ScopedCollection::for('coaches')->findOne(
             ['_id' => $coachIdObj],
             ['projection' => ['profile_photo_key' => 1]]
         );
@@ -134,7 +134,7 @@ class CoachController {
             $uploadUrl = \App\Services\S3Service::getPresignedUploadUrl($key, $mime);
             $readUrl   = \App\Services\S3Service::getPresignedDownloadUrl($key, 1440);
 
-            Database::collection('coaches')->updateOne(
+            ScopedCollection::for('coaches')->updateOne(
                 ['_id' => $coachIdObj],
                 ['$set' => [
                     'profile_photo'     => $readUrl,
@@ -168,7 +168,7 @@ class CoachController {
             $photoUrl = "{$appUrl}/{$relPath}/{$filename}";
             $localKey = "local:{$relPath}/{$filename}";
 
-            Database::collection('coaches')->updateOne(
+            ScopedCollection::for('coaches')->updateOne(
                 ['_id' => $coachIdObj],
                 ['$set' => [
                     'profile_photo'     => $photoUrl,
@@ -186,14 +186,14 @@ class CoachController {
     public function deletePhoto(array $params): void {
         $coachId    = $params['_auth']['sub'];
         $coachIdObj = new ObjectId($coachId);
-        $coach      = Database::collection('coaches')->findOne(
+        $coach      = ScopedCollection::for('coaches')->findOne(
             ['_id' => $coachIdObj],
             ['projection' => ['profile_photo_key' => 1]]
         );
 
         $this->deletePhotoByKey($coach['profile_photo_key'] ?? null);
 
-        Database::collection('coaches')->updateOne(
+        ScopedCollection::for('coaches')->updateOne(
             ['_id' => $coachIdObj],
             ['$set' => ['profile_photo' => null, 'profile_photo_key' => null, 'updated_at' => new UTCDateTime()]]
         );
@@ -201,9 +201,12 @@ class CoachController {
         Response::success(null, 'Profile photo deleted');
     }
 
-    // GET /coaches/registered — list all active coaches (public directory)
+    // GET /coaches/registered — list all active coaches (public directory).
+    // Bypasses RLS via ScopedCollection::raw() because this is a directory
+    // listing, not a self-resource access; RLS would only return the
+    // requesting coach.
     public function index(array $params): void {
-        $coaches = Database::collection('coaches')->find(
+        $coaches = ScopedCollection::for('coaches')->raw()->find(
             ['active' => ['$ne' => false]],
             [
                 'projection' => ['password_hash' => 0, 'stripe_customer_id' => 0],
@@ -219,7 +222,7 @@ class CoachController {
     public function deleteAccount(array $params): void {
         $coachId = new ObjectId($params['_auth']['sub']);
 
-        Database::collection('coaches')->updateOne(
+        ScopedCollection::for('coaches')->updateOne(
             ['_id' => $coachId],
             ['$set' => [
                 'active'     => false,
@@ -246,7 +249,7 @@ class CoachController {
             Response::error('New password must be at least 8 characters', 422);
         }
 
-        $coach = Database::collection('coaches')->findOne(
+        $coach = ScopedCollection::for('coaches')->findOne(
             ['_id' => $coachIdObj],
             ['projection' => ['password_hash' => 1]]
         );
@@ -255,7 +258,7 @@ class CoachController {
             Response::error('Current password is incorrect', 403);
         }
 
-        Database::collection('coaches')->updateOne(
+        ScopedCollection::for('coaches')->updateOne(
             ['_id' => $coachIdObj],
             ['$set' => [
                 'password_hash' => password_hash($body['new_password'], PASSWORD_BCRYPT, ['cost' => 12]),
@@ -292,7 +295,7 @@ class CoachController {
     }
 
     private function getClientCount(string $coachId): int {
-        return Database::collection('clients')->countDocuments([
+        return ScopedCollection::for('clients')->countDocuments([
             'coach_id' => new ObjectId($coachId),
             'active'   => true,
         ]);
