@@ -37,6 +37,11 @@ $db->getCollection('nutrition_plans')->createIndex(['client_id' => 1, 'week_star
 $db->getCollection('nutrition_plans')->createIndex(['client_ids' => 1]);
 $db->getCollection('nutrition_plans')->createIndex(['coach_id' => 1]);
 
+// foods
+$db->getCollection('foods')->createIndex(['name' => 'text']);
+$db->getCollection('foods')->createIndex(['coach_id' => 1]);
+$db->getCollection('foods')->createIndex(['source' => 1, 'fdc_id' => 1], ['unique' => true, 'sparse' => true]);
+
 // checkin_meetings
 $db->getCollection('checkin_meetings')->createIndex(['coach_id' => 1, 'scheduled_at' => 1]);
 $db->getCollection('checkin_meetings')->createIndex(['client_id' => 1, 'status' => 1]);

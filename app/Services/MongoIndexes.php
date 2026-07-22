@@ -49,6 +49,13 @@ class MongoIndexes
             ['key' => ['client_id' => 1, 'week_start' => -1]],
         ]);
 
+        // foods
+        $db->getCollection('foods')->createIndexes([
+            ['key' => ['name' => 'text']],
+            ['key' => ['coach_id' => 1]],
+            ['key' => ['source' => 1, 'fdc_id' => 1], 'unique' => true, 'sparse' => true],
+        ]);
+
         // checkin_meetings
         $db->getCollection('checkin_meetings')->createIndexes([
             ['key' => ['coach_id' => 1, 'scheduled_at' => 1]],

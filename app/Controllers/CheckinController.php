@@ -44,13 +44,25 @@ class CheckinController
         $client = ScopedCollection::for('clients')->findOne(['_id' => $clientId]);
         if (!$client) Response::error('Client not found', 404);
 
+        // meeting_link is rendered as <a href=...> in the frontend,
+        // so it MUST be a real http(s) URL — otherwise a coach could
+        // store "javascript:..." and XSS every client who clicks it.
+        $meetingLink = isset($body['meeting_link']) ? trim((string) $body['meeting_link']) : null;
+        if ($meetingLink !== null && $meetingLink !== '') {
+            $validated = filter_var($meetingLink, FILTER_VALIDATE_URL);
+            if ($validated === false || !preg_match('#^https?://#i', $validated)) {
+                Response::error('meeting_link must be an http(s) URL', 422);
+            }
+            $meetingLink = $validated;
+        }
+
         // RLS: auto-sets coach_id for coach role
         $result = ScopedCollection::for('checkin_meetings')->insertOne([
             'coach_id'     => $coachId,
             'client_id'    => $clientId,
             'scheduled_at' => new \MongoDB\BSON\UTCDateTime(strtotime($body['scheduled_at']) * 1000),
             'type'         => $body['type'],    // 'call' | 'video' | 'chat'
-            'meeting_link' => $body['meeting_link'] ?? null,
+            'meeting_link' => $meetingLink,
             'notes'        => $body['notes'] ?? null,
             'status'       => 'scheduled',
             'client_response' => 'pending',
@@ -91,10 +103,24 @@ class CheckinController
         $allowed = ['scheduled_at', 'type', 'meeting_link', 'notes', 'status'];
         $set     = [];
         foreach ($allowed as $field) {
-            if (isset($body[$field])) {
-                $set[$field] = $field === 'scheduled_at'
-                    ? new \MongoDB\BSON\UTCDateTime(strtotime($body[$field]) * 1000)
-                    : $body[$field];
+            if (!array_key_exists($field, $body)) continue;
+            if ($field === 'scheduled_at') {
+                $set[$field] = new \MongoDB\BSON\UTCDateTime(strtotime($body[$field]) * 1000);
+            } elseif ($field === 'meeting_link') {
+                // Same XSS guard as in store(): an empty value is OK
+                // (clearing the field), otherwise must be http(s).
+                $val = is_string($body[$field]) ? trim($body[$field]) : '';
+                if ($val === '') {
+                    $set[$field] = '';
+                } else {
+                    $validated = filter_var($val, FILTER_VALIDATE_URL);
+                    if ($validated === false || !preg_match('#^https?://#i', $validated)) {
+                        Response::error('meeting_link must be an http(s) URL', 422);
+                    }
+                    $set[$field] = $validated;
+                }
+            } else {
+                $set[$field] = $body[$field];
             }
         }
 
@@ -123,8 +149,47 @@ class CheckinController
         // RLS: coach role scopes by coach_id; client role by client_id
         $meeting = ScopedCollection::for('checkin_meetings')->findOne(['_id' => $mtgId]);
         if (!$meeting) Response::error('Meeting not found', 404);
-        ScopedCollection::for('checkin_meetings')->deleteOne(['_id' => $mtgId]);
+
+        // Soft-cancel: preserve the record in the database with status 'cancelled'
+        ScopedCollection::for('checkin_meetings')->updateOne(
+            ['_id' => $mtgId],
+            ['$set' => [
+                'status'     => 'cancelled',
+                'updated_at' => new \MongoDB\BSON\UTCDateTime(),
+            ]]
+        );
         Response::success(null, 'Meeting cancelled');
+    }
+
+    // POST /checkins/:id/status
+    public function updateStatus(array $params): void
+    {
+        $mtgId   = new ObjectId($params['id']);
+        $body    = Request::body();
+        $status  = $body['status'] ?? null;
+
+        if (!in_array($status, ['scheduled', 'completed', 'cancelled'], true)) {
+            Response::error('Validation failed', 422, ['status' => ['Must be scheduled, completed, or cancelled']]);
+        }
+
+        // RLS: coach role scopes by coach_id; client role by client_id
+        $meeting = ScopedCollection::for('checkin_meetings')->findOne(['_id' => $mtgId]);
+        if (!$meeting) Response::error('Meeting not found', 404);
+
+        ScopedCollection::for('checkin_meetings')->updateOne(
+            ['_id' => $mtgId],
+            ['$set' => [
+                'status'     => $status,
+                'updated_at' => new \MongoDB\BSON\UTCDateTime(),
+            ]]
+        );
+
+        $messages = [
+            'scheduled' => 'Meeting reactivated',
+            'completed' => 'Meeting marked as completed',
+            'cancelled' => 'Meeting cancelled',
+        ];
+        Response::success(null, $messages[$status] ?? 'Status updated');
     }
 
     // GET /client/checkins (client)

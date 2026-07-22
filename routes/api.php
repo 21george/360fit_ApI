@@ -9,6 +9,7 @@ use App\Controllers\{
     WorkoutLogController,
     WorkoutAnalysisController,
     NutritionController,
+    FoodController,
     CheckinController,
     MessageController,
     MediaController,
@@ -97,6 +98,14 @@ $router->post('/coach/clients/:id/workout-analyses/:analysisId/approve', [Workou
 $router->post('/coach/clients/:id/workout-analyses/:analysisId/reject', [WorkoutAnalysisController::class, 'reject'], [CoachMiddleware::class]);
 $router->post('/coach/clients/:id/workout-analyses/:analysisId/assign', [WorkoutAnalysisController::class, 'assign'], [CoachMiddleware::class]);
 
+// ─── Coach: Foods ────────────────────────────────────────────────────────────
+$router->get('/foods/search',        [FoodController::class, 'search'],    [CoachMiddleware::class]);
+$router->get('/foods/calculate',     [FoodController::class, 'calculate'], [CoachMiddleware::class]);
+$router->get('/foods/fdc/:fdcId',    [FoodController::class, 'details'],   [CoachMiddleware::class]);
+$router->get('/foods',               [FoodController::class, 'index'],     [CoachMiddleware::class]);
+$router->get('/foods/:id',           [FoodController::class, 'show'],      [CoachMiddleware::class]);
+$router->post('/foods',              [FoodController::class, 'store'],     [CoachMiddleware::class]);
+
 // ─── Coach: Nutrition Plans ───────────────────────────────────────────────────
 $router->get('/nutrition-plans',        [NutritionController::class, 'index'],  [CoachMiddleware::class]);
 $router->post('/nutrition-plans',       [NutritionController::class, 'store'],  [CoachMiddleware::class]);
@@ -110,6 +119,7 @@ $router->get('/checkins',      [CheckinController::class, 'index'],   [CoachMidd
 $router->post('/checkins',     [CheckinController::class, 'store'],   [CoachMiddleware::class]);
 $router->put('/checkins/:id',  [CheckinController::class, 'update'],  [CoachMiddleware::class]);
 $router->delete('/checkins/:id',[CheckinController::class, 'destroy'],[CoachMiddleware::class]);
+$router->post('/checkins/:id/status',[CheckinController::class, 'updateStatus'],[CoachMiddleware::class]);
 
 // ─── Coach: Messages ──────────────────────────────────────────────────────────
 // Static routes MUST be registered before the dynamic :clientId route to prevent

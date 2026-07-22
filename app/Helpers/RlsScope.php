@@ -28,10 +28,11 @@ class RlsScope
         /* ── Coach-owned resources ───────────────────────────────────────── */
         'clients'              => ['coach' => 'coach_id',           'client' => '_id'],
         'workout_plans'        => ['coach' => 'coach_id',           'client' => [self::class, 'workoutPlansClientFilter']],
-        'nutrition_plans'      => ['coach' => 'coach_id',           'client' => 'client_id'],
+        'nutrition_plans'      => ['coach' => 'coach_id',           'client' => [self::class, 'nutritionPlansClientFilter']],
         'checkin_meetings'     => ['coach' => 'coach_id',           'client' => 'client_id'],
         'coaching_sessions'    => ['coach' => 'coach_id',           'client' => 'client_id'],
         'live_training_sessions' => ['coach' => 'coach_id',         'client' => [self::class, 'liveTrainingClientFilter']],
+        'foods'                  => ['coach' => null,               'client' => null], // public cache + manual custom-food scoping
 
         /* ── Client-owned resources (coach has no direct access) ─────────── */
         'workout_logs'         => ['coach' => null,                 'client' => 'client_id'],
@@ -97,6 +98,21 @@ class RlsScope
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    /**
+     * Client-role filter for `nutrition_plans`: a plan is visible to a
+     * client if they are the primary `client_id` OR they appear in the
+     * `client_ids` group array.
+     */
+    public static function nutritionPlansClientFilter(ObjectId $userId): array
+    {
+        return [
+            '$or' => [
+                ['client_id'  => $userId],
+                ['client_ids' => ['$in' => [$userId]]],
+            ],
+        ];
     }
 
     /**
