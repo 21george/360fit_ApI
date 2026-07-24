@@ -5,11 +5,14 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Helpers\{Request, Response};
-use App\Services\{JwtService, CodeService};
+use App\Services\{CodeService, EmailService, JwtService};
 use MongoDB\BSON\ObjectId;
 
 class AuthController
 {
+    private const VERIFICATION_CODE_TTL_SECONDS = 900;
+    private const VERIFICATION_RESEND_COOLDOWN_SECONDS = 60;
+
     // ── Cookie helpers ──────────────────────────────────────────────────────────
     private function isSecure(): bool
     {
@@ -106,6 +109,9 @@ class AuthController
             Response::error('Email already registered', 409);
         }
 
+        $verificationCode = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+        $now = new \MongoDB\BSON\UTCDateTime();
+
         $result = $col->insertOne([
             'name'              => $body['name'],
             'email'             => $email,
@@ -114,8 +120,12 @@ class AuthController
             'client_count'      => 0,
             'subscription_tier'   => 'free',
             'subscription_status' => 'pending',
-            'created_at'        => new \MongoDB\BSON\UTCDateTime(),
-            'updated_at'        => new \MongoDB\BSON\UTCDateTime(),
+            'email_verified_at' => null,
+            'verification_code_hash' => password_hash($verificationCode, PASSWORD_BCRYPT, ['cost' => 12]),
+            'verification_code_expires_at' => new \MongoDB\BSON\UTCDateTime((time() + self::VERIFICATION_CODE_TTL_SECONDS) * 1000),
+            'verification_code_sent_at' => $now,
+            'created_at'        => $now,
+            'updated_at'        => $now,
         ]);
 
         $coachId = (string) $result->getInsertedId();
@@ -123,10 +133,118 @@ class AuthController
         // Generate a short-lived setup token for subscription selection
         $setupToken = JwtService::generateSetupToken($coachId);
 
+        if (!EmailService::sendCoachVerificationCode($email, $body['name'], $verificationCode)) {
+            error_log("Unable to send verification email for coach {$coachId}");
+        }
+
         Response::success([
             'id' => $coachId,
             'setup_token' => $setupToken,
         ], 'Registration successful. Please select your subscription plan.', 201);
+    }
+
+    // POST /auth/verify-email
+    public function verifyEmail(array $params): void
+    {
+        $body = Request::body();
+        $errors = Request::validate($body, ['coach_id' => 'required', 'code' => 'required|numeric|min:6|max:6']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        try {
+            $coachId = new ObjectId((string) $body['coach_id']);
+        } catch (\Throwable) {
+            Response::error('Invalid coach ID', 422);
+        }
+
+        $coaches = Database::collection('coaches');
+        $coach = $coaches->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        if (($coach['email_verified_at'] ?? null) !== null) {
+            Response::error('Email is already verified', 409);
+        }
+
+        $expiresAt = $coach['verification_code_expires_at'] ?? null;
+        $isExpired = !$expiresAt || $expiresAt->toDateTime()->getTimestamp() < time();
+        if ($isExpired || !CodeService::verify((string) $body['code'], (string) ($coach['verification_code_hash'] ?? ''))) {
+            Response::error('Invalid or expired verification code', 422);
+        }
+
+        $now = new \MongoDB\BSON\UTCDateTime();
+        $coaches->updateOne(['_id' => $coachId], ['$set' => [
+            'email_verified_at' => $now,
+            'updated_at' => $now,
+        ], '$unset' => [
+            'verification_code_hash' => '',
+            'verification_code_expires_at' => '',
+            'verification_code_sent_at' => '',
+        ]]);
+
+        Response::success($this->authenticatedCoachResponse($coach), 'Email verified');
+    }
+
+    // POST /auth/resend-verification
+    public function resendVerification(array $params): void
+    {
+        $body = Request::body();
+        $errors = Request::validate($body, ['coach_id' => 'required']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        try {
+            $coachId = new ObjectId((string) $body['coach_id']);
+        } catch (\Throwable) {
+            Response::error('Invalid coach ID', 422);
+        }
+
+        $coaches = Database::collection('coaches');
+        $coach = $coaches->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+        if (($coach['email_verified_at'] ?? null) !== null) Response::error('Email is already verified', 409);
+
+        $sentAt = $coach['verification_code_sent_at'] ?? null;
+        if ($sentAt && (time() - $sentAt->toDateTime()->getTimestamp()) < self::VERIFICATION_RESEND_COOLDOWN_SECONDS) {
+            Response::error('Please wait before requesting another verification code', 429);
+        }
+
+        $verificationCode = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+        $now = new \MongoDB\BSON\UTCDateTime();
+        $coaches->updateOne(['_id' => $coachId], ['$set' => [
+            'verification_code_hash' => password_hash($verificationCode, PASSWORD_BCRYPT, ['cost' => 12]),
+            'verification_code_expires_at' => new \MongoDB\BSON\UTCDateTime((time() + self::VERIFICATION_CODE_TTL_SECONDS) * 1000),
+            'verification_code_sent_at' => $now,
+            'updated_at' => $now,
+        ]]);
+
+        if (!EmailService::sendCoachVerificationCode((string) $coach['email'], (string) $coach['name'], $verificationCode)) {
+            Response::error('Unable to send verification email', 503);
+        }
+
+        Response::success(null, 'Verification code sent');
+    }
+
+    private function authenticatedCoachResponse(object $coach): array
+    {
+        $coachId = (string) $coach['_id'];
+        $payload = [
+            'sub' => $coachId,
+            'role' => 'coach',
+            'name' => $coach['name'],
+            'email' => $coach['email'],
+        ];
+        $accessToken = JwtService::generateAccessToken($payload);
+        $refreshToken = JwtService::generateRefreshToken($payload);
+        $this->setTokenCookies($accessToken, $refreshToken);
+
+        return [
+            'access_token' => $accessToken,
+            'refresh_token' => $refreshToken,
+            'coach' => [
+                'id' => $coachId,
+                'name' => $coach['name'],
+                'email' => $coach['email'],
+                'language' => $coach['language'] ?? 'en',
+            ],
+        ];
     }
 
     // POST /auth/client/login
@@ -191,6 +309,53 @@ class AuthController
         ], 'Login successful');
     }
 
+    // POST /auth/staff/login
+    public function staffLogin(array $params): void
+    {
+        $body   = Request::body();
+        $errors = Request::validate($body, ['email' => 'required|email', 'password' => 'required']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        $staff = Database::collection('staff')->findOne(['email' => strtolower($body['email'])]);
+        if (!$staff || empty($staff['password_hash']) || !password_verify($body['password'], $staff['password_hash'])) {
+            Response::error('Invalid credentials', 401);
+        }
+        if (($staff['status'] ?? '') !== 'active') {
+            Response::error('Staff account is not active', 403);
+        }
+
+        $org = Database::collection('coaches')->findOne(['_id' => $staff['org_id']]);
+        if (!$org || ($org['active'] ?? true) !== true) {
+            Response::error('Organization access blocked', 403);
+        }
+
+        $staffId = (string) $staff['_id'];
+        $payload = [
+            'sub'        => $staffId,
+            'role'       => 'staff',
+            'name'       => $staff['name'] ?? '',
+            'email'      => $staff['email'],
+            'org_id'     => (string) $staff['org_id'],
+            'staff_role' => $staff['role'],
+        ];
+
+        $accessToken  = JwtService::generateAccessToken($payload);
+        $refreshToken = JwtService::generateRefreshToken($payload);
+        $this->setTokenCookies($accessToken, $refreshToken);
+
+        Response::success([
+            'access_token'  => $accessToken,
+            'refresh_token' => $refreshToken,
+            'staff'         => [
+                'id'    => $staffId,
+                'name'  => $staff['name'] ?? '',
+                'email' => $staff['email'],
+                'role'  => $staff['role'],
+                'org_id' => (string) $staff['org_id'],
+            ],
+        ], 'Login successful');
+    }
+
     // POST /auth/logout
     public function logout(array $params): void
     {
@@ -239,13 +404,23 @@ class AuthController
                 }
             }
 
+            if (($decoded['role'] ?? '') === 'staff') {
+                $staff = Database::collection('staff')->findOne([
+                    '_id' => new ObjectId((string) $decoded['sub']),
+                ]);
+                if (!$staff || ($staff['status'] ?? '') !== 'active') {
+                    $this->clearTokenCookies();
+                    Response::error('Staff access blocked', 403);
+                }
+            }
+
             $payload = [
                 'sub'           => $decoded['sub'],
                 'role'          => $decoded['role'],
                 'name'          => $decoded['name'],
                 'token_version' => $decoded['token_version'] ?? 0,
             ];
-            foreach (['coach_id', 'email'] as $k) {
+            foreach (['coach_id', 'email', 'org_id', 'staff_role'] as $k) {
                 if (isset($decoded[$k])) $payload[$k] = $decoded[$k];
             }
 

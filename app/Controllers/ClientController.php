@@ -662,9 +662,7 @@ class ClientController
             $emailSent  = false;
             if ($email) {
                 try {
-                    $emailService = new EmailService();
-                    $emailService->sendClientWelcome($email, $name, $code, $coach['name'] ?? 'Your Coach');
-                    $emailSent = true;
+                    $emailSent = EmailService::sendClientLoginCode($email, $name, $coach['name'] ?? 'Your Coach', $code);
                 } catch (\Throwable $e) {
                     error_log('Import: failed to send welcome email to ' . $email . ': ' . $e->getMessage());
                 }

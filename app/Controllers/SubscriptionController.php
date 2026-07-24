@@ -5,7 +5,7 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Helpers\{Request, Response};
-use App\Services\{StripeService, JwtService};
+use App\Services\{StripeService, JwtService, EmailService};
 use MongoDB\BSON\ObjectId;
 
 class SubscriptionController
@@ -58,10 +58,189 @@ class SubscriptionController
     }
 
     /**
-     * POST /subscription/select-plan
-     * Select a subscription plan during signup (setup token auth).
+     * POST /subscription/setup-trial
+     * Step 1: Create a Stripe customer + SetupIntent client_secret for the
+     * payment-method collection form (Stripe Elements). Called during signup
+     * (setup token auth) before the card details are entered.
      */
-    public function selectPlan(array $params): void
+    public function setupTrial(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $body    = Request::body();
+        $errors  = Request::validate($body, ['plan_tier' => 'required']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        $tier = $body['plan_tier'];
+        if (!in_array($tier, ['pro', 'business'])) {
+            Response::error('Invalid tier. Choose pro or business', 422);
+        }
+
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        if (($coach['subscription_status'] ?? '') !== 'pending') {
+            Response::error('Subscription already configured', 409);
+        }
+
+        try {
+            $stripe = new StripeService();
+        } catch (\RuntimeException) {
+            if (($_ENV['APP_ENV'] ?? '') === 'development') {
+                Response::success([
+                    'client_secret' => 'seti_mock_secret_dev',
+                    'customer_id'   => 'cus_mock_dev',
+                ], 'SetupIntent created (dev mode)');
+            }
+            Response::error('Payment processing is not configured.', 503);
+        }
+
+        $period  = $body['plan_period'] ?? $body['period'] ?? 'monthly';
+
+        // Create or reuse Stripe customer
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) {
+            $customer   = $stripe->createCustomer($coach['email'], $coach['name'], (string) $coachId);
+            $customerId = $customer['id'];
+            Database::collection('coaches')->updateOne(
+                ['_id' => $coachId],
+                ['$set' => ['stripe_customer_id' => $customerId]]
+            );
+        }
+
+        // Store selected tier + period for confirm step
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'pending_subscription_tier'   => $tier,
+                'pending_subscription_period' => $period,
+                'updated_at'                  => new \MongoDB\BSON\UTCDateTime(),
+            ]]
+        );
+
+        $setupIntent = $stripe->createTrialSetupIntent($customerId, (string) $coachId);
+
+        Response::success([
+            'client_secret' => $setupIntent['client_secret'],
+            'customer_id'   => $customerId,
+        ], 'SetupIntent created');
+    }
+
+    /**
+     * POST /subscription/confirm-trial
+     * Step 2: Called after Stripe.js confirmCardSetup succeeds on the frontend.
+     * Creates a 30-day trial subscription using the validated payment method.
+     */
+    public function confirmTrial(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $body    = Request::body();
+        $errors  = Request::validate($body, ['payment_method_id' => 'required']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        $paymentMethodId = $body['payment_method_id'];
+
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        $tier       = $coach['pending_subscription_tier'] ?? null;
+        $period     = $coach['pending_subscription_period'] ?? 'monthly';
+        $customerId = $coach['stripe_customer_id'] ?? null;
+
+        if (!$tier || !$customerId) {
+            Response::error('Setup session expired — please restart signup', 422);
+        }
+
+        try {
+            $stripe = new StripeService();
+        } catch (\RuntimeException) {
+            Response::error('Payment processing is not configured.', 503);
+        }
+
+        $priceId   = $stripe->getPriceIdForTierAndPeriod($tier, $period);
+        $trialDays = (int) ($_ENV['STRIPE_TRIAL_DAYS'] ?? 30);
+
+        try {
+            $sub = $stripe->createTrialSubscription(
+                $customerId,
+                $priceId,
+                $paymentMethodId,
+                (string) $coachId,
+                $trialDays
+            );
+        } catch (\RuntimeException $e) {
+            Response::error('Failed to create trial subscription: ' . $e->getMessage(), 422);
+        }
+
+        $trialEnd = isset($sub['trial_end']) ? new \MongoDB\BSON\UTCDateTime((int) $sub['trial_end'] * 1000) : null;
+
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'stripe_subscription_id'  => $sub['id'],
+                'subscription_tier'       => $tier,
+                'subscription_period'     => $period,
+                'subscription_status'     => 'trialing',
+                'trial_ends_at'           => $trialEnd,
+                'subscription_period_end' => $trialEnd,
+                'cancel_at_period_end'    => false,
+                'updated_at'              => new \MongoDB\BSON\UTCDateTime(),
+            ],
+            '$unset' => [
+                'pending_subscription_tier'   => '',
+                'pending_subscription_period' => '',
+            ]]
+        );
+
+        // Send trial-start email
+        $trialEndDate = $trialEnd
+            ? (new \DateTime())->setTimestamp((int) $sub['trial_end'])->format('F j, Y')
+            : '';
+        EmailService::sendTrialStarted(
+            $coach['email'],
+            $coach['name'],
+            $tier,
+            $trialEndDate
+        );
+
+        // Generate dashboard JWT
+        $payload = [
+            'sub'   => (string) $coachId,
+            'role'  => 'coach',
+            'name'  => $coach['name'],
+            'email' => $coach['email'],
+        ];
+        $accessToken  = JwtService::generateAccessToken($payload);
+        $refreshToken = JwtService::generateRefreshToken($payload);
+
+        $isSecure = ($_ENV['APP_ENV'] ?? '') === 'production'
+            || (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+
+        setcookie('access_token', $accessToken, [
+            'expires'  => time() + 900,
+            'path'     => '/',
+            'secure'   => $isSecure,
+            'httponly' => true,
+            'samesite' => 'Strict',
+        ]);
+        setcookie('refresh_token', $refreshToken, [
+            'expires'  => time() + 2592000,
+            'path'     => '/',
+            'secure'   => $isSecure,
+            'httponly' => true,
+            'samesite' => 'Strict',
+        ]);
+
+        Response::success([
+            'access_token'  => $accessToken,
+            'refresh_token' => $refreshToken,
+            'tier'          => $tier,
+            'trial_ends_at' => $trialEnd ? (string) $trialEnd : null,
+            'redirect'      => '/dashboard',
+        ], 'Trial started');
+    }
+
+    /**
+     * POST /subscription/select-plan
     {
         $coachId = new ObjectId($params['_auth']['sub']);
         $body    = Request::body();
@@ -345,6 +524,14 @@ class SubscriptionController
                 $this->handleSubscriptionDeleted($data);
                 break;
 
+            case 'customer.subscription.trial_will_end':
+                $this->handleTrialWillEnd($data);
+                break;
+
+            case 'invoice.payment_succeeded':
+                $this->handleInvoicePaymentSucceeded($data);
+                break;
+
             case 'invoice.payment_failed':
                 $this->handlePaymentFailed($data);
                 break;
@@ -412,17 +599,70 @@ class SubscriptionController
         $tier   = $this->tierFromPriceId($priceId);
         $period = $this->periodFromPriceId($priceId);
 
+        $update = [
+            'subscription_tier'       => $tier,
+            'subscription_period'     => $period,
+            'subscription_status'     => $sub['status'] ?? 'active',
+            'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
+            'cancel_at_period_end'    => $sub['cancel_at_period_end'] ?? false,
+            'updated_at'              => new \MongoDB\BSON\UTCDateTime(),
+        ];
+
+        if (!empty($sub['trial_end'])) {
+            $update['trial_ends_at'] = new \MongoDB\BSON\UTCDateTime((int) $sub['trial_end'] * 1000);
+        }
+
         Database::collection('coaches')->updateOne(
             ['_id' => new ObjectId($coachId)],
+            ['$set' => $update]
+        );
+    }
+
+    private function handleTrialWillEnd(array $sub): void
+    {
+        $coachId = $sub['metadata']['coach_id'] ?? null;
+        if (!$coachId) return;
+
+        $coach = Database::collection('coaches')->findOne(['_id' => new ObjectId($coachId)]);
+        if (!$coach) return;
+
+        $trialEndTs  = $sub['trial_end'] ?? null;
+        $trialEndStr = $trialEndTs
+            ? (new \DateTime())->setTimestamp((int) $trialEndTs)->format('F j, Y')
+            : '';
+
+        // Fire reminder email
+        EmailService::sendTrialEndingReminder($coach['email'], $coach['name'], $trialEndStr);
+    }
+
+    private function handleInvoicePaymentSucceeded(array $invoice): void
+    {
+        $customerId = $invoice['customer'] ?? null;
+        if (!$customerId) return;
+
+        // Only act on subscription invoices (skip one-off charges)
+        if (empty($invoice['subscription'])) return;
+
+        $coach = Database::collection('coaches')->findOne(['stripe_customer_id' => $customerId]);
+        if (!$coach) return;
+
+        $coachId = (string) $coach['_id'];
+        $wasTrialing = ($coach['subscription_status'] ?? '') === 'trialing';
+
+        Database::collection('coaches')->updateOne(
+            ['stripe_customer_id' => $customerId],
             ['$set' => [
-                'subscription_tier'       => $tier,
-                'subscription_period'     => $period,
-                'subscription_status'     => $sub['status'] ?? 'active',
-                'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
-                'cancel_at_period_end'    => $sub['cancel_at_period_end'] ?? false,
-                'updated_at'              => new \MongoDB\BSON\UTCDateTime(),
+                'subscription_status' => 'active',
+                'trial_ends_at'       => null,
+                'updated_at'          => new \MongoDB\BSON\UTCDateTime(),
             ]]
         );
+
+        // Send conversion email when trial converts to paid
+        if ($wasTrialing) {
+            $tier = $coach['subscription_tier'] ?? 'pro';
+            EmailService::sendTrialConverted($coach['email'], $coach['name'], $tier);
+        }
     }
 
     private function handleSubscriptionDeleted(array $sub): void

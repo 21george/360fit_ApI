@@ -19,9 +19,16 @@ use App\Controllers\{
     CoachingSessionController,
     SubscriptionController,
     SettingsController,
-    NotificationsController
+    NotificationsController,
+    MealLogController,
+    WearableController,
+    PredictionController,
+    StaffController,
+    AssessmentController,
+    StudioController,
+    RehabController
 };
-use App\Middleware\{CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SubscriptionMiddleware, SetupAuthMiddleware};
+use App\Middleware\{CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SubscriptionMiddleware, SetupAuthMiddleware, StaffMiddleware};
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 $router->get('/health', function () {
@@ -36,9 +43,12 @@ $router->get('/health', function () {
 
 // ─── Auth (rate-limited) ──────────────────────────────────────────────────────
 $router->post('/auth/coach/register', [AuthController::class, 'coachRegister'], [AuthRateLimitMiddleware::class]);
+$router->post('/auth/verify-email', [AuthController::class, 'verifyEmail'], [AuthRateLimitMiddleware::class]);
+$router->post('/auth/resend-verification', [AuthController::class, 'resendVerification'], [AuthRateLimitMiddleware::class]);
 $router->post('/auth/coach/login',    [AuthController::class, 'coachLogin'],    [AuthRateLimitMiddleware::class]);
 $router->post('/auth/client/login',   [AuthController::class, 'clientLogin'],   [AuthRateLimitMiddleware::class]);
 $router->post('/auth/refresh',        [AuthController::class, 'refresh'],       [AuthRateLimitMiddleware::class]);
+$router->post('/auth/staff/login',    [AuthController::class, 'staffLogin'],    [AuthRateLimitMiddleware::class]);
 $router->post('/auth/logout',         [AuthController::class, 'logout']);
 
 // ─── Coach: Profile ──────────────────────────────────────────────────────────
@@ -201,8 +211,32 @@ $router->post('/client/coaching-sessions/:id/token',       [CoachingSessionContr
 // ─── Client: Analytics ────────────────────────────────────────────────────────
 $router->get('/client/analytics',                   [AnalyticsController::class, 'clientSelfAnalytics'],    [ClientMiddleware::class]);
 
+// ─── Client: Meal Completion ──────────────────────────────────────────────────
+$router->post('/client/meal-logs',   [MealLogController::class, 'store'],   [ClientMiddleware::class]);
+$router->delete('/client/meal-logs', [MealLogController::class, 'destroy'], [ClientMiddleware::class]);
+
+// ─── Coach: Meal Logs + Adherence ─────────────────────────────────────────────
+$router->get('/coach/clients/:id/meal-logs', [MealLogController::class, 'clientLogs'], [CoachMiddleware::class]);
+$router->get('/coach/clients/:id/adherence', [MealLogController::class, 'adherence'],  [CoachMiddleware::class]);
+
+// ─── Client: Wearable ─────────────────────────────────────────────────────────
+$router->post('/client/wearable/data',           [WearableController::class, 'pushData'],      [ClientMiddleware::class]);
+$router->get('/client/wearable/status',          [WearableController::class, 'status'],        [ClientMiddleware::class]);
+$router->delete('/client/wearable/disconnect',   [WearableController::class, 'disconnect'],    [ClientMiddleware::class]);
+$router->get('/client/wearable/fitbit/connect',  [WearableController::class, 'fitbitConnect'], [ClientMiddleware::class]);
+$router->get('/client/wearable/fitbit/callback', [WearableController::class, 'fitbitCallback']);
+
+// ─── Coach: Client Wearable Data ─────────────────────────────────────────────
+$router->get('/coach/clients/:id/wearable', [WearableController::class, 'clientData'], [CoachMiddleware::class]);
+
+// ─── Progress Prediction ──────────────────────────────────────────────────────
+$router->get('/coach/clients/:id/prediction', [PredictionController::class, 'show'], [CoachMiddleware::class]);
+$router->get('/client/prediction',            [PredictionController::class, 'show'], [ClientMiddleware::class]);
+
 // ─── Subscription ─────────────────────────────────────────────────────────────
-$router->post('/subscription/select-plan', [SubscriptionController::class, 'selectPlan'], [SetupAuthMiddleware::class]);
+$router->post('/subscription/select-plan',   [SubscriptionController::class, 'selectPlan'],   [SetupAuthMiddleware::class]);
+$router->post('/subscription/setup-trial',   [SubscriptionController::class, 'setupTrial'],   [SetupAuthMiddleware::class]);
+$router->post('/subscription/confirm-trial', [SubscriptionController::class, 'confirmTrial'], [SetupAuthMiddleware::class]);
 $router->get('/subscription',          [SubscriptionController::class, 'status'],   [CoachMiddleware::class]);
 $router->post('/subscription/checkout',[SubscriptionController::class, 'checkout'], [CoachMiddleware::class]);
 $router->post('/subscription/portal',  [SubscriptionController::class, 'portal'],   [CoachMiddleware::class]);
@@ -228,6 +262,48 @@ $router->post('/support/contact',       [SettingsController::class, 'createSuppo
 
 // ─── Notifications ──────────────────────────────────────────────────────────────
 require_once BASE_PATH . '/routes/notifications.php';
+
+// ─── Organizations & Staff / RBAC (Feature 6) ────────────────────────────────
+// StaffMiddleware accepts either a legacy coach JWT (implicit "owner") or a
+// staff JWT, resolving org_id + role onto $params for every route below.
+$router->post('/org/staff/invite',        [StaffController::class, 'invite'],       [StaffMiddleware::class]);
+$router->get('/org/staff',                [StaffController::class, 'index'],        [StaffMiddleware::class]);
+$router->post('/org/staff/accept-invite', [StaffController::class, 'acceptInvite']);
+$router->patch('/org/staff/:id/role',     [StaffController::class, 'updateRole'],    [StaffMiddleware::class]);
+$router->post('/org/staff/:id/deactivate',[StaffController::class, 'deactivate'],    [StaffMiddleware::class]);
+$router->patch('/org/clients/:id/assignment', [StaffController::class, 'assignClient'], [StaffMiddleware::class]);
+
+// ─── Sports-science Assessments (Feature 7) ──────────────────────────────────
+$router->post('/org/clients/:id/assessments',        [AssessmentController::class, 'store'],  [StaffMiddleware::class]);
+$router->get('/org/clients/:id/assessments',          [AssessmentController::class, 'index'],  [StaffMiddleware::class]);
+$router->get('/org/clients/:id/assessments/latest',   [AssessmentController::class, 'latest'], [StaffMiddleware::class]);
+
+// ─── Studio Operations (Feature 9) ───────────────────────────────────────────
+$router->post('/org/classes',                 [StudioController::class, 'createClass'],  [StaffMiddleware::class]);
+$router->get('/org/classes',                  [StudioController::class, 'index'],        [StaffMiddleware::class]);
+$router->get('/client/classes',               [StudioController::class, 'indexForClient'],[ClientMiddleware::class]);
+$router->post('/client/classes/:id/book',     [StudioController::class, 'bookAsClient'], [ClientMiddleware::class]);
+$router->post('/org/classes/:id/book',        [StudioController::class, 'bookAsStaff'],  [StaffMiddleware::class]);
+$router->post('/client/bookings/:id/cancel',  [StudioController::class, 'cancelAsClient'],[ClientMiddleware::class]);
+$router->post('/org/bookings/:id/cancel',     [StudioController::class, 'cancelAsStaff'], [StaffMiddleware::class]);
+$router->post('/org/memberships',             [StudioController::class, 'createMembership'],       [StaffMiddleware::class]);
+$router->get('/org/memberships',              [StudioController::class, 'listMemberships'],        [StaffMiddleware::class]);
+$router->post('/org/memberships/:id/status',  [StudioController::class, 'updateMembershipStatus'],  [StaffMiddleware::class]);
+$router->post('/client/consent-documents',    [StudioController::class, 'signConsentAsClient'],     [ClientMiddleware::class]);
+$router->post('/org/clients/:id/checkin',     [StudioController::class, 'checkinAsStaff'],  [StaffMiddleware::class]);
+$router->post('/client/checkin',              [StudioController::class, 'checkinAsClient'], [ClientMiddleware::class]);
+$router->get('/org/reports/utilization',      [StudioController::class, 'utilizationReport'],[StaffMiddleware::class]);
+
+// ─── Physiotherapy / Rehab Track (Feature 8) ─────────────────────────────────
+$router->post('/client/parq',                       [RehabController::class, 'submitParq'], [ClientMiddleware::class]);
+$router->get('/org/clients/:id/parq',                [RehabController::class, 'getParq'],    [StaffMiddleware::class]);
+$router->post('/org/clients/:id/rehab-track/start',  [RehabController::class, 'startTrack'], [StaffMiddleware::class]);
+$router->get('/org/clients/:id/rehab-track',         [RehabController::class, 'getTrack'],   [StaffMiddleware::class]);
+$router->post('/org/rehab-tracks/:id/proms',         [RehabController::class, 'recordProm'], [StaffMiddleware::class]);
+$router->post('/org/rehab-tracks/:id/pain-logs',     [RehabController::class, 'logPainAsStaff'],  [StaffMiddleware::class]);
+$router->post('/client/rehab-tracks/:id/pain-logs',  [RehabController::class, 'logPainAsClient'], [ClientMiddleware::class]);
+$router->post('/org/rehab-tracks/:id/soap-notes',    [RehabController::class, 'addSoapNote'],   [StaffMiddleware::class]);
+$router->get('/org/rehab-tracks/:id/soap-notes',     [RehabController::class, 'listSoapNotes'], [StaffMiddleware::class]);
 
 // ─── Client: Notifications ────────────────────────────────────────────────────
 $router->get('/client/notifications',               [NotificationsController::class, 'clientIndex'],       [ClientMiddleware::class]);

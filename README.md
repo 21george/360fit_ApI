@@ -1,6 +1,6 @@
-# CoachPro — PHP Backend API
+# 360Fit — PHP Backend API
 
-RESTful PHP API powering the CoachPro coaching platform. Uses MongoDB Atlas as the database, JWT (Bearer + httpOnly cookies) for authentication, Stripe for subscriptions, LiveKit for video sessions, and AWS S3 / Cloudflare R2 for media storage.
+RESTful PHP API powering the 360Fit coaching platform. Uses MongoDB Atlas as the database, JWT (Bearer + httpOnly cookies) for authentication, Stripe for subscriptions, LiveKit for video sessions, and AWS S3 / Cloudflare R2 for media storage.
 
 ---
 
@@ -8,7 +8,7 @@ RESTful PHP API powering the CoachPro coaching platform. Uses MongoDB Atlas as t
 
 | Layer    | Technology                                        |
 | -------- | ------------------------------------------------- |
-| Language | PHP 8.1+                                          |
+| Language | PHP 8.2+                                          |
 | Database | MongoDB Atlas                                     |
 | Auth     | JWT (Bearer tokens + httpOnly cookies)            |
 | Payments | Stripe (subscriptions, invoices, payment methods) |

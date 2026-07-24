@@ -241,14 +241,26 @@ class FoodService
 
     /**
      * Extract key nutrients per 100g from USDA foodNutrients array.
+     * Returns macros + key micronutrients (fiber, sugar, sodium, iron, calcium,
+     * potassium, vitamin C, vitamin D).
      */
     private function extractNutrients(array $foodNutrients): array
     {
         $mapping = [
-            'calories'   => ['Energy', 'energy', 'calories'],
-            'protein_g'  => ['Protein', 'protein'],
-            'carbs_g'    => ['Carbohydrate, by difference', 'Carbohydrates', 'carbs'],
-            'fat_g'      => ['Total lipid (fat)', 'Fat', 'fat'],
+            // macros
+            'calories'    => ['Energy', 'energy', 'calories'],
+            'protein_g'   => ['Protein', 'protein'],
+            'carbs_g'     => ['Carbohydrate, by difference', 'Carbohydrates', 'carbs'],
+            'fat_g'       => ['Total lipid (fat)', 'Fat', 'fat'],
+            // micronutrients
+            'fiber_g'     => ['Fiber, total dietary', 'Dietary Fiber', 'fiber'],
+            'sugar_g'     => ['Sugars, total including NLEA', 'Total Sugars', 'sugar'],
+            'sodium_mg'   => ['Sodium, Na', 'Sodium'],
+            'potassium_mg'=> ['Potassium, K', 'Potassium'],
+            'calcium_mg'  => ['Calcium, Ca', 'Calcium'],
+            'iron_mg'     => ['Iron, Fe', 'Iron'],
+            'vitamin_c_mg'=> ['Vitamin C, total ascorbic acid', 'Vitamin C'],
+            'vitamin_d_mcg'=> ['Vitamin D (D2 + D3)', 'Vitamin D3 (cholecalciferol)', 'Vitamin D'],
         ];
 
         $result = array_fill_keys(array_keys($mapping), 0.0);
@@ -260,8 +272,6 @@ class FoodService
             foreach ($mapping as $key => $aliases) {
                 foreach ($aliases as $alias) {
                     if (stripos($name, $alias) !== false) {
-                        // Ensure value is per 100g. USDA often returns per 100g already,
-                        // but check unitName to be safe.
                         $unit = $n['unitName'] ?? ($n['nutrient']['unitName'] ?? '');
                         if (stripos($unit, 'kJ') !== false) {
                             $value = $value / 4.184; // kJ -> kcal

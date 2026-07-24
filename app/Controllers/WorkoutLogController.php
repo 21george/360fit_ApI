@@ -118,6 +118,9 @@ class WorkoutLogController
             'day'             => $body['day'],
             'exercises'       => $body['exercises'] ?? [],
             'notes'           => $body['notes'] ?? null,
+            'session_rpe'     => isset($body['session_rpe']) && is_numeric($body['session_rpe'])
+                ? max(1, min(10, (int) $body['session_rpe']))
+                : null,
             'media_uploads'   => [],
             'completed_at'    => new \MongoDB\BSON\UTCDateTime(),
         ]);

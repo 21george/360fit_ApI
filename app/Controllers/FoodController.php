@@ -176,6 +176,9 @@ class FoodController
      * GET /foods/calculate?quantity=150g&food_id=...  (or &fdc_id=...)
      *
      * Calculate nutrients for a food given a quantity string.
+     * Returns macros + micronutrients scaled to the given quantity.
+     * Quantity may be a weight ("150g", "2oz") or a plain integer
+     * count ("6") which is treated as grams when no unit is provided.
      */
     public function calculate(array $params): void
     {
@@ -193,7 +196,6 @@ class FoodController
         $food = null;
         if ($foodId !== '') {
             $food = ScopedCollection::for('foods')->findOne(['_id' => new ObjectId($foodId)]);
-            // Prevent cross-coach access to custom foods
             if ($food) {
                 $data = (array) $food;
                 if (($data['source'] ?? '') === 'custom' && isset($data['coach_id'])) {
@@ -206,7 +208,6 @@ class FoodController
         } elseif ($fdcId > 0) {
             $food = ScopedCollection::for('foods')->findOne(['fdc_id' => $fdcId]);
 
-            // Not cached locally — fetch from USDA API using the USDA_API_KEY
             if (!$food) {
                 try {
                     $details   = $this->foodService->getFoodDetails($fdcId);
@@ -214,17 +215,11 @@ class FoodController
 
                     $quantityG = $this->parseQuantityToGrams($quantity);
                     if ($quantityG <= 0) {
-                        Response::error('Invalid quantity. Use formats like: 150g, 1kg, 8oz, 2 cups', 422);
+                        Response::error('Invalid quantity. Use formats like: 150g, 1kg, 8oz, 2 cups, 6', 422);
                     }
 
                     $factor = $quantityG / 100;
-                    Response::success([
-                        'calories'   => round((float)($nutrients['calories']  ?? 0) * $factor, 1),
-                        'protein_g'  => round((float)($nutrients['protein_g'] ?? 0) * $factor, 1),
-                        'carbs_g'    => round((float)($nutrients['carbs_g']   ?? 0) * $factor, 1),
-                        'fat_g'      => round((float)($nutrients['fat_g']     ?? 0) * $factor, 1),
-                        'quantity_g' => $quantityG,
-                    ]);
+                    Response::success($this->scaleNutrients($nutrients, $factor, $quantityG));
                     return;
                 } catch (\Throwable $e) {
                     error_log('USDA API food details failed: ' . $e->getMessage());
@@ -239,19 +234,37 @@ class FoodController
 
         $quantityG = $this->parseQuantityToGrams($quantity);
         if ($quantityG <= 0) {
-            Response::error('Invalid quantity. Use formats like: 150g, 1kg, 8oz, 2 cups', 422);
+            Response::error('Invalid quantity. Use formats like: 150g, 1kg, 8oz, 2 cups, 6', 422);
         }
 
         $nutrients = (array) ($food->nutrients_per_100g ?? []);
         $factor    = $quantityG / 100;
 
-        Response::success([
-            'calories'   => round((float)($nutrients['calories']  ?? 0) * $factor, 1),
-            'protein_g'  => round((float)($nutrients['protein_g'] ?? 0) * $factor, 1),
-            'carbs_g'    => round((float)($nutrients['carbs_g']   ?? 0) * $factor, 1),
-            'fat_g'      => round((float)($nutrients['fat_g']     ?? 0) * $factor, 1),
-            'quantity_g' => $quantityG,
-        ]);
+        Response::success($this->scaleNutrients($nutrients, $factor, $quantityG));
+    }
+
+    /**
+     * Scale a nutrients_per_100g map by $factor and attach quantity_g.
+     */
+    private function scaleNutrients(array $nutrients, float $factor, float $quantityG): array
+    {
+        $scaled = ['quantity_g' => round($quantityG, 1)];
+
+        // Macros (always present)
+        foreach (['calories', 'protein_g', 'carbs_g', 'fat_g'] as $key) {
+            $scaled[$key] = round((float)($nutrients[$key] ?? 0) * $factor, 1);
+        }
+
+        // Micronutrients (include when non-zero in source data)
+        $micros = ['fiber_g', 'sugar_g', 'sodium_mg', 'potassium_mg', 'calcium_mg', 'iron_mg', 'vitamin_c_mg', 'vitamin_d_mcg'];
+        foreach ($micros as $key) {
+            $base = (float)($nutrients[$key] ?? 0);
+            if ($base > 0) {
+                $scaled[$key] = round($base * $factor, 2);
+            }
+        }
+
+        return $scaled;
     }
 
     private function parseQuantityToGrams(string $input): float

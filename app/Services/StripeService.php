@@ -90,7 +90,7 @@ class StripeService
             'success_url'              => $successUrl ?? "{$frontendUrl}/subscription/success",
             'cancel_url'               => $cancelUrl ?? "{$frontendUrl}/subscription/cancel",
             'metadata[coach_id]'       => $coachId,
-            'subscription_data[trial_period_days]' => 14,
+            'subscription_data[trial_period_days]' => (int) ($_ENV['STRIPE_TRIAL_DAYS'] ?? 30),
             'subscription_data[metadata][coach_id]' => $coachId,
         ]);
     }
@@ -109,7 +109,7 @@ class StripeService
             'success_url'              => "{$frontendUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}",
             'cancel_url'               => "{$frontendUrl}/subscription/cancel",
             'metadata[coach_id]'       => $coachId,
-            'subscription_data[trial_period_days]' => 14,
+            'subscription_data[trial_period_days]' => (int) ($_ENV['STRIPE_TRIAL_DAYS'] ?? 30),
             'subscription_data[metadata][coach_id]' => $coachId,
             'subscription_data[metadata][pending_tier]' => $this->getTierFromPriceId($priceId),
         ]);
@@ -245,6 +245,49 @@ class StripeService
         return $this->request('POST', '/setup_intents', [
             'customer'             => $customerId,
             'payment_method_types' => ['card'],
+        ]);
+    }
+
+    /**
+     * Create a SetupIntent specifically for trial onboarding.
+     * Returns client_secret so the frontend can confirm the card via Stripe.js.
+     */
+    public function createTrialSetupIntent(string $customerId, string $coachId): array
+    {
+        return $this->request('POST', '/setup_intents', [
+            'customer'                  => $customerId,
+            'payment_method_types'      => ['card'],
+            'usage'                     => 'off_session',
+            'metadata[coach_id]'        => $coachId,
+            'metadata[purpose]'         => 'trial_signup',
+        ]);
+    }
+
+    /**
+     * Create a trial subscription using a pre-confirmed payment method.
+     * The subscription enters trialing state immediately; Stripe charges
+     * the default_payment_method automatically when the trial ends.
+     */
+    public function createTrialSubscription(
+        string $customerId,
+        string $priceId,
+        string $paymentMethodId,
+        string $coachId,
+        int    $trialDays = 30
+    ): array {
+        // Set default payment method on customer first
+        $this->setDefaultPaymentMethod($customerId, $paymentMethodId);
+
+        $trialEnd = time() + ($trialDays * 86400);
+
+        return $this->request('POST', '/subscriptions', [
+            'customer'                              => $customerId,
+            'items[0][price]'                       => $priceId,
+            'trial_end'                             => $trialEnd,
+            'default_payment_method'                => $paymentMethodId,
+            'payment_settings[save_default_payment_method]' => 'on_subscription',
+            'metadata[coach_id]'                    => $coachId,
+            'expand[]'                              => 'latest_invoice.payment_intent',
         ]);
     }
 

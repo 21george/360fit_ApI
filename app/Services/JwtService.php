@@ -156,4 +156,42 @@ class JwtService
             return null;
         }
     }
+
+    /**
+     * Generate a staff invite token, valid for 72 hours. Used to let an invited
+     * staff member set their password and activate their account.
+     */
+    public static function generateStaffInviteToken(string $staffId): string
+    {
+        $self = self::getInstance();
+        $claims = [
+            'iss'  => 'coaching-platform',
+            'iat'  => time(),
+            'exp'  => time() + (72 * 3600),
+            'sub'  => $staffId,
+            'type' => 'staff_invite',
+        ];
+        return JWT::encode($claims, $self->secret, 'HS256');
+    }
+
+    /**
+     * Verify and decode a staff invite token. Returns staff ID or null on failure.
+     */
+    public static function verifyStaffInviteToken(string $token): ?string
+    {
+        $self = self::getInstance();
+        try {
+            $decoded = JWT::decode($token, new Key($self->secret, 'HS256'));
+            $data = (array) $decoded;
+            if (($data['type'] ?? '') !== 'staff_invite') {
+                return null;
+            }
+            if (isset($data['exp']) && $data['exp'] < time()) {
+                return null;
+            }
+            return $data['sub'] ?? null;
+        } catch (\Exception) {
+            return null;
+        }
+    }
 }
