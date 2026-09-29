@@ -19,6 +19,11 @@ if ($isDev) {
     $origins[] = 'http://localhost:3001';
     $origins[] = 'http://localhost:19006';
     $origins[] = 'exp://localhost:19000';
+    $origins[] = 'http://10.0.2.2:19000';   // Android emulator (Expo Go)
+    $origins[] = 'http://10.0.2.2:8081';    // Android emulator (Metro)
+    $origins[] = 'http://192.168.1.100:19000'; // Physical device (adjust IP as needed)
+    $origins[] = 'http://192.168.1.100:8081';  // Physical device Metro
+    $origins[] = 'http://192.168.1.100:19006'; // Physical device web
 }
 
 return [

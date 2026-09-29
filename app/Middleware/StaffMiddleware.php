@@ -76,6 +76,7 @@ class StaffMiddleware extends AuthMiddleware
             'sub'        => (string) $auth['sub'],
             'role'       => $role,
             'org_id'     => $params['_org_id'],
+            'coach_id'   => $params['_org_id'],
             'staff_role' => $params['_role'],
         ]);
     }

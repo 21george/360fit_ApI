@@ -5,7 +5,7 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Helpers\{Request, Response, ScopedCollection, Diff};
-use App\Services\{CodeService, EmailService, NotificationTriggerService};
+use App\Services\{CodeService, EmailService, NotificationTriggerService, ProfilePhotoService};
 use App\Controllers\SubscriptionController;
 use MongoDB\BSON\ObjectId;
 
@@ -192,11 +192,16 @@ class ClientController
             'limit'      => $perPage,
             'projection' => ['login_code_hash' => 0],
             'sort'       => $sort,
-        ]);
+        ])->toArray();
+
+        $clientIds = array_map(fn($d) => $d['_id'], $docs);
+
+        // ── Batch compute workout progress for all clients on this page ──
+        $progressMap = $this->computeClientProgress($clientIds);
 
         $clients = [];
         foreach ($docs as $doc) {
-            $clients[] = $this->format($doc);
+            $clients[] = $this->format($doc, $progressMap[(string) $doc['_id']] ?? null);
         }
 
         Response::paginated($clients, $total, $page, $perPage);
@@ -205,7 +210,7 @@ class ClientController
     // POST /coach/clients
     public function store(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, ['name' => 'required|min:2']);
         if ($errors) Response::error('Validation failed', 422, $errors);
@@ -252,11 +257,25 @@ class ClientController
         $doc['age'] = isset($body['age']) ? (int) $body['age'] : null;
 
         $result = $col->insertOne($doc);
+        $insertedId = (string) $result->getInsertedId();
+
+        \App\Services\ActivityLogService::log(
+            'client_created',
+            $insertedId,
+            $body['name'] ?? null,
+            ['login_code' => $code]
+        );
+
+        self::recalculateClientCount($coachId);
 
         // Send login code email if client has email
         $emailSent = false;
         if (!empty($body['email'])) {
-            $emailSent = EmailService::sendClientLoginCode($body['email'], $body['name'], $coach['name'] ?? 'Your Coach', $code);
+            try {
+                $emailSent = EmailService::sendClientLoginCode($body['email'], $body['name'], $coach['name'] ?? 'Your Coach', $code);
+            } catch (\Throwable $e) {
+                error_log('Client store: failed to send login code email to ' . $body['email'] . ': ' . $e->getMessage());
+            }
         }
 
         Response::success([
@@ -300,6 +319,13 @@ class ClientController
         // counterpart to updateClientProfile's $changedFields used for
         // the "profile updated" notification.
         $changedFields = Diff::changedFields($body, $client, $allowed);
+
+        \App\Services\ActivityLogService::log(
+            'client_updated',
+            (string) $client['_id'],
+            $client['name'] ?? null,
+            ['changed_fields' => array_keys($changedFields)]
+        );
         $payload = $this->format($updated);
         $payload['changed_fields'] = $changedFields;
         Response::success($payload, 'Client updated');
@@ -322,6 +348,9 @@ class ClientController
                 'updated_at'    => new \MongoDB\BSON\UTCDateTime(),
             ]]
         );
+
+        self::recalculateClientCount($client['coach_id']);
+
         Response::success(null, 'Client deleted');
     }
 
@@ -329,85 +358,43 @@ class ClientController
     {
         $clientId = new ObjectId($params['id']);
 
-        // RLS automatically scopes by coach_id for coach role
         $client = ScopedCollection::for('clients')->findOne([
             '_id' => $clientId,
         ]);
         if (!$client) Response::error('Client not found', 404);
 
         $ext = (string) Request::get('ext', 'jpg');
-        $allowed = ['jpg', 'jpeg', 'png', 'webp'];
-        if (!in_array(strtolower($ext), $allowed)) {
+        if (!ProfilePhotoService::validateExt($ext)) {
             Response::error('Invalid file type. Allowed: jpg, jpeg, png, webp', 422);
         }
 
-        // Delete old photo first
-        if (!empty($client['profile_photo_url'])) {
-            $oldKey = $client['profile_photo_key'] ?? null;
-            if ($oldKey && str_starts_with((string) $oldKey, 'local:')) {
-                $oldPath = BASE_PATH . '/public/' . substr((string) $oldKey, 6);
-                if (is_file($oldPath)) @unlink($oldPath);
-            } elseif ($oldKey && \App\Services\S3Service::isConfigured()) {
-                \App\Services\S3Service::delete((string) $oldKey);
-            }
+        try {
+            $result = ProfilePhotoService::upload(
+                (string) $clientId,
+                'clients',
+                $ext,
+                $client['profile_photo_key'] ?? null
+            );
+        } catch (\RuntimeException $e) {
+            Response::error($e->getMessage(), $e->getMessage() === 'No photo file provided' ? 422 : 500);
         }
 
-        $uuid = bin2hex(random_bytes(8));
+        Database::collection('clients')->updateOne(
+            ['_id' => $clientId],
+            ['$set' => [
+                'profile_photo_url' => $result['url'],
+                'profile_photo_key' => $result['key'],
+                'updated_at'        => new \MongoDB\BSON\UTCDateTime(),
+            ]]
+        );
 
-        if (\App\Services\S3Service::isConfigured()) {
-            $mimeMap = ['jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'webp' => 'image/webp'];
-            $mime    = $mimeMap[strtolower($ext)] ?? 'image/jpeg';
-            $key     = "clients/{$clientId}/profile/{$uuid}.{$ext}";
-
-            $uploadUrl = \App\Services\S3Service::getPresignedUploadUrl($key, $mime);
-            $readUrl   = \App\Services\S3Service::getPresignedDownloadUrl($key, 1440);
-
-            Database::collection('clients')->updateOne(
-                ['_id' => $clientId],
-                ['$set' => [
-                    'profile_photo_url' => $readUrl,
-                    'profile_photo_key' => $key,
-                    'updated_at'        => new \MongoDB\BSON\UTCDateTime(),
-                ]]
-            );
-
-            Response::success([
-                'upload_url'    => $uploadUrl,
-                'profile_photo' => $readUrl,
-                'key'           => $key,
-            ], 'Upload URL generated');
-        } else {
-            if (empty($_FILES['photo']['tmp_name'])) {
-                Response::error('No photo file provided', 422);
-            }
-            $relPath = "uploads/clients/{$clientId}";
-            $dir     = BASE_PATH . '/public/' . $relPath;
-            if (!is_dir($dir)) mkdir($dir, 0755, true);
-
-            $filename = "{$uuid}.{$ext}";
-            $dest     = "{$dir}/{$filename}";
-
-            if (!move_uploaded_file($_FILES['photo']['tmp_name'], $dest)) {
-                Response::error('Failed to save photo', 500);
-            }
-
-            $appUrl   = rtrim($_ENV['APP_URL'] ?? 'http://localhost:8000', '/');
-            $photoUrl = "{$appUrl}/{$relPath}/{$filename}";
-            $localKey = "local:{$relPath}/{$filename}";
-
-            Database::collection('clients')->updateOne(
-                ['_id' => $clientId],
-                ['$set' => [
-                    'profile_photo_url' => $photoUrl,
-                    'profile_photo_key' => $localKey,
-                    'updated_at'        => new \MongoDB\BSON\UTCDateTime(),
-                ]]
-            );
-
-            Response::success([
-                'profile_photo' => $photoUrl,
-            ], 'Photo uploaded');
+        $response = ['profile_photo' => $result['url']];
+        if (isset($result['upload_url'])) {
+            $response['upload_url'] = $result['upload_url'];
+            $response['key']        = $result['key'];
         }
+
+        Response::success($response, isset($result['upload_url']) ? 'Upload URL generated' : 'Photo uploaded');
     }
 
     // DELETE /coach/clients/:id/permanent
@@ -441,6 +428,9 @@ class ClientController
         }
 
         ScopedCollection::for('clients')->deleteOne(['_id' => $clientId]);
+
+        self::recalculateClientCount($coachId);
+
         Response::success(null, 'Client permanently deleted');
     }
 
@@ -475,6 +465,9 @@ class ClientController
                 'updated_at'    => new \MongoDB\BSON\UTCDateTime(),
             ]]
         );
+
+        self::recalculateClientCount($client['coach_id']);
+
         Response::success(null, 'Client blocked');
     }
 
@@ -498,23 +491,61 @@ class ClientController
                 'updated_at' => new \MongoDB\BSON\UTCDateTime(),
             ]]
         );
+
+        self::recalculateClientCount($client['coach_id']);
+
         Response::success(null, 'Client unblocked');
     }
 
     // POST /coach/clients/:id/regenerate-code
     public function regenerateCode(array $params): void
     {
-        $client   = $this->findClient($params);
-        $code     = CodeService::generate();
-        $codeHash = CodeService::hash($code);
-        $codeLookup = CodeService::lookupHash($code);
+        $client      = $this->findClient($params);
+        $clientId    = $client['_id'];
+        $newVersion  = (int) (($client['token_version'] ?? 0) + 1);
+        $code        = CodeService::generate();
+        $codeHash    = CodeService::hash($code);
+        $codeLookup  = CodeService::lookupHash($code);
 
         ScopedCollection::for('clients')->updateOne(
-            ['_id' => $client['_id']],
-            ['$set' => ['login_code_hash' => $codeHash, 'code_lookup' => $codeLookup, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
+            ['_id' => $clientId],
+            ['$set' => [
+                'login_code_hash' => $codeHash,
+                'code_lookup'     => $codeLookup,
+                'token_version'   => $newVersion,
+                'updated_at'      => new \MongoDB\BSON\UTCDateTime(),
+            ]]
         );
 
-        Response::success(['login_code' => $code], 'Login code regenerated');
+        // Invalidate all outstanding client tokens so the previous login code
+        // can no longer be used. This forces any logged-in FitApp clients to
+        // log out and re-authenticate with the freshly generated code.
+        Database::collection('refresh_tokens')->deleteMany([
+            'user_id' => $clientId,
+            'role'    => 'client',
+        ]);
+
+        // Email the new login code to the client if they have an address.
+        $emailSent = false;
+        $clientEmail = $client['email'] ?? null;
+        if ($clientEmail) {
+            try {
+                $coachName = $params['_auth']['name'] ?? 'Your Coach';
+                $emailSent = EmailService::sendClientLoginCode(
+                    (string) $clientEmail,
+                    (string) ($client['name'] ?? ''),
+                    $coachName,
+                    $code
+                );
+            } catch (\Throwable $e) {
+                error_log('Regenerate code: failed to send login code email to ' . $clientEmail . ': ' . $e->getMessage());
+            }
+        }
+
+        Response::success([
+            'login_code' => $code,
+            'email_sent' => $emailSent,
+        ], 'Login code regenerated. All existing client sessions have been signed out.');
     }
 
     // GET /coach/clients/:id/analytics
@@ -594,7 +625,7 @@ class ClientController
     // POST /coach/clients/import  — bulk import clients from JSON array
     public function import(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
 
         if (empty($body['clients']) || !is_array($body['clients'])) {
@@ -681,6 +712,8 @@ class ClientController
         $emailsSent    = count(array_filter($loginCodes, fn($c) => $c['email_sent']));
         $emailsSkipped = count(array_filter($loginCodes, fn($c) => $c['email'] === null));
 
+        self::recalculateClientCount($coachId);
+
         Response::success([
             'created'        => $created,
             'failed'         => $failed,
@@ -690,6 +723,22 @@ class ClientController
             'emails_skipped' => $emailsSkipped,
             'login_codes'    => $loginCodes,
         ], "{$created} client(s) imported", 201);
+    }
+
+    private static function recalculateClientCount(ObjectId $coachId): void
+    {
+        $count = Database::collection('clients')->countDocuments([
+            'coach_id' => $coachId,
+            'active'   => true,
+        ]);
+
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'client_count' => $count,
+                'updated_at'   => new \MongoDB\BSON\UTCDateTime(),
+            ]]
+        );
     }
 
     private function findClient(array $params, bool $includeBlocked = false): object
@@ -708,18 +757,106 @@ class ClientController
         return $client;
     }
 
-    private function format(object $doc): array
+    /**
+     * Batch-compute workout progress for a list of clients.
+     * Returns a map: client_id (string) => [total_days, completed_days, progress_pct]
+     */
+    private function computeClientProgress(array $clientIds): array
+    {
+        if (empty($clientIds)) return [];
+
+        // Find all active/saved workout plans for these clients
+        $plans = Database::collection('workout_plans')->find([
+            '$or' => [
+                ['client_id'  => ['$in' => $clientIds]],
+                ['client_ids' => ['$in' => $clientIds]],
+            ],
+            'status' => ['$in' => ['active', 'saved']],
+        ])->toArray();
+
+        $planMap     = []; // plan_id => plan
+        $clientPlans = []; // client_id => [plan_ids]
+        foreach ($plans as $plan) {
+            $pid = (string) $plan['_id'];
+            $planMap[$pid] = $plan;
+
+            if (isset($plan['client_id'])) {
+                $cid = (string) $plan['client_id'];
+                $clientPlans[$cid][] = $pid;
+            }
+            if (!empty($plan['client_ids'])) {
+                foreach ($plan['client_ids'] as $cid) {
+                    $clientPlans[(string) $cid][] = $pid;
+                }
+            }
+        }
+
+        // Find all workout logs for these clients
+        $logs = Database::collection('workout_logs')->find([
+            'client_id' => ['$in' => $clientIds],
+        ])->toArray();
+
+        $logMap = []; // client_id => plan_id => [logged_day_names]
+        foreach ($logs as $log) {
+            $cid = (string) $log['client_id'];
+            $pid = (string) ($log['workout_plan_id'] ?? '');
+            if ($pid) {
+                $logMap[$cid][$pid][] = strtolower($log['day'] ?? '');
+            }
+        }
+
+        $progressMap = [];
+        foreach ($clientIds as $cid) {
+            $cidStr   = (string) $cid;
+            $planIds  = array_unique($clientPlans[$cidStr] ?? []);
+            $totalDays = 0;
+            $completedDays = 0;
+
+            foreach ($planIds as $pid) {
+                $plan = $planMap[$pid] ?? null;
+                if (!$plan) continue;
+
+                $days = count($plan['days'] ?? []);
+                $totalDays += $days;
+
+                $loggedDays = $logMap[$cidStr][$pid] ?? [];
+                $uniqueLogged = array_unique(array_filter($loggedDays));
+                $completedDays += count($uniqueLogged);
+            }
+
+            $progressMap[$cidStr] = [
+                'total_days'     => $totalDays,
+                'completed_days' => $completedDays,
+                'progress_pct'   => $totalDays > 0 ? round(($completedDays / $totalDays) * 100, 1) : 0.0,
+            ];
+        }
+
+        return $progressMap;
+    }
+
+    private function format(object $doc, ?array $progress = null): array
     {
         $fields = ['email','phone','address','city','postal_code','nationality','occupation','gender','date_of_birth','current_weight_kg','height_cm','chest_cm','waist_cm','body_fat_pct','bmi','lean_mass_kg','sickness','age','weight','location','profile_photo_url','notes'];
-        $out = ['id' => (string) $doc['_id'], 'name' => $doc['name']];
+        $out = ['id' => (string) $doc['_id'], 'name' => $doc['name'] ?? ''];
         foreach ($fields as $f) {
             $out[$f] = $doc[$f] ?? null;
         }
         $out['language'] = $doc['language'] ?? 'en';
-        $out['active']   = $doc['active'];
+        $out['active']   = $doc['active'] ?? false;
         $out['is_blocked'] = $doc['is_blocked'] ?? false;
         $out['created_at'] = isset($doc['created_at']) ? (string) $doc['created_at'] : null;
         $out['updated_at'] = isset($doc['updated_at']) ? (string) $doc['updated_at'] : null;
+        $out['primary_staff_id']       = isset($doc['primary_staff_id']) ? (string) $doc['primary_staff_id'] : null;
+        $out['last_staff_id']           = isset($doc['last_staff_id']) ? (string) $doc['last_staff_id'] : null;
+        $out['last_staff_name']         = $doc['last_staff_name'] ?? null;
+        $out['last_staff_role']         = $doc['last_staff_role'] ?? null;
+        $out['last_staff_activity']     = $doc['last_staff_activity'] ?? null;
+        $out['last_staff_activity_at']   = isset($doc['last_staff_activity_at']) ? (string) $doc['last_staff_activity_at'] : null;
+        $out['workout_progress'] = $progress ?? [
+            'total_days'     => 0,
+            'completed_days' => 0,
+            'progress_pct'   => 0.0,
+        ];
         return $out;
     }
 }

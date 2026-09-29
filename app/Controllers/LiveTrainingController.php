@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Config\Database;
-use App\Helpers\{Request, Response};
+use App\Helpers\{Request, Response, ScopedCollection};
 use App\Services\NotificationTriggerService;
 use MongoDB\BSON\{ObjectId, UTCDateTime};
 
@@ -18,14 +18,13 @@ class LiveTrainingController
     /* ── Coach: list all sessions ──────────────────────────────────────────── */
     public function index(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
-        $filter   = ['coach_id' => $coachId];
+        $filter   = [];
         $status   = Request::get('status');
         $category = Request::get('category');
         if ($status && in_array($status, self::STATUSES, true))     $filter['status']   = $status;
         if ($category && in_array($category, self::CATEGORIES, true)) $filter['category'] = $category;
 
-        $sessions = Database::collection('live_training_sessions')
+        $sessions = ScopedCollection::for('live_training_sessions')
             ->find($filter, ['sort' => ['scheduled_at' => -1]])
             ->toArray();
 
@@ -35,7 +34,7 @@ class LiveTrainingController
     /* ── Coach: single session ─────────────────────────────────────────────── */
     public function show(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
         Response::success($this->format($session));
     }
@@ -43,7 +42,7 @@ class LiveTrainingController
     /* ── Coach: create session ─────────────────────────────────────────────── */
     public function store(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, [
             'title'        => 'required',
@@ -108,7 +107,7 @@ class LiveTrainingController
     /* ── Coach: update session ─────────────────────────────────────────────── */
     public function update(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
         $body    = Request::body();
 
@@ -154,7 +153,7 @@ class LiveTrainingController
 
         if (!empty($set)) {
             $set['updated_at'] = new UTCDateTime();
-            Database::collection('live_training_sessions')->updateOne(
+            ScopedCollection::for('live_training_sessions')->updateOne(
                 ['_id' => $session['_id']],
                 ['$set' => $set]
             );
@@ -166,9 +165,9 @@ class LiveTrainingController
     /* ── Coach: delete session ─────────────────────────────────────────────── */
     public function destroy(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
-        Database::collection('live_training_sessions')->deleteOne(['_id' => $session['_id']]);
+        ScopedCollection::for('live_training_sessions')->deleteOne(['_id' => $session['_id']]);
         Database::collection('live_training_requests')->deleteMany(['session_id' => $session['_id']]);
         Response::success(null, 'Session deleted');
     }
@@ -176,9 +175,9 @@ class LiveTrainingController
     /* ── Coach: go live / end session ──────────────────────────────────────── */
     public function goLive(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
-        Database::collection('live_training_sessions')->updateOne(
+        ScopedCollection::for('live_training_sessions')->updateOne(
             ['_id' => $session['_id']],
             ['$set' => ['status' => 'live', 'started_at' => new UTCDateTime(), 'updated_at' => new UTCDateTime()]]
         );
@@ -187,9 +186,9 @@ class LiveTrainingController
 
     public function endSession(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
-        Database::collection('live_training_sessions')->updateOne(
+        ScopedCollection::for('live_training_sessions')->updateOne(
             ['_id' => $session['_id']],
             ['$set' => ['status' => 'ended', 'ended_at' => new UTCDateTime(), 'updated_at' => new UTCDateTime()]]
         );
@@ -199,7 +198,7 @@ class LiveTrainingController
     /* ── Coach: list join requests ─────────────────────────────────────────── */
     public function listRequests(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
         $status  = Request::get('status');
 
@@ -238,7 +237,7 @@ class LiveTrainingController
     /* ── Coach: approve/reject request ─────────────────────────────────────── */
     public function handleRequest(array $params): void
     {
-        $coachId   = new ObjectId($params['_auth']['sub']);
+        $coachId   = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session   = $this->findSession($params['id'], $coachId);
         $body      = Request::body();
         $requestId = $body['request_id'] ?? null;
@@ -272,13 +271,26 @@ class LiveTrainingController
             );
         }
 
+        // Notify client about the approval/rejection
+        try {
+            $triggerService = new NotificationTriggerService();
+            $triggerService->notifyClientLiveRequestStatus(
+                (string) $req['client_id'],
+                (string) $session['_id'],
+                $session['title'] ?? 'Live Training',
+                $action
+            );
+        } catch (\Throwable $e) {
+            error_log('Failed to notify client of live training request status: ' . $e->getMessage());
+        }
+
         Response::success(null, "Request $action");
     }
 
     /* ── Coach: list participants ──────────────────────────────────────────── */
     public function participants(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
 
         $pids = (array) ($session['participant_ids'] ?? []);
@@ -300,7 +312,7 @@ class LiveTrainingController
     /* ── Coach: send live chat message ─────────────────────────────────────── */
     public function sendChat(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
         $body    = Request::body();
         $content = trim($body['content'] ?? '');
@@ -323,7 +335,7 @@ class LiveTrainingController
     /* ── Coach: get chat messages ──────────────────────────────────────────── */
     public function getChat(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
 
         $messages = Database::collection('live_training_chat')
@@ -490,6 +502,21 @@ class LiveTrainingController
                 'created_at' => new UTCDateTime(),
                 'updated_at' => new UTCDateTime(),
             ]);
+
+            // Notify coach
+            try {
+                $triggerService = new NotificationTriggerService();
+                $triggerService->notifyCoachLiveRequest(
+                    (string) $session['coach_id'],
+                    (string) $sessionId,
+                    $session['title'] ?? 'Live Training',
+                    (string) $clientId,
+                    $client['name'] ?? 'A client'
+                );
+            } catch (\Throwable $e) {
+                error_log('Failed to notify coach of live training request: ' . $e->getMessage());
+            }
+
             Response::success(null, 'Join request submitted', 201);
         } else {
             // Direct join
@@ -597,9 +624,8 @@ class LiveTrainingController
         if (!preg_match('/^[a-f0-9]{24}$/', $rawId)) {
             Response::error('Invalid session ID', 400);
         }
-        $session = Database::collection('live_training_sessions')->findOne([
-            '_id'      => new ObjectId($rawId),
-            'coach_id' => $coachId,
+        $session = ScopedCollection::for('live_training_sessions')->findOne([
+            '_id' => new ObjectId($rawId),
         ]);
         if (!$session) Response::error('Session not found', 404);
         return $session;

@@ -58,7 +58,6 @@ class StripeService
 
         $result = curl_exec($ch);
         $code   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
 
         $data = json_decode($result, true) ?? [];
 
@@ -76,6 +75,23 @@ class StripeService
             'email'            => $email,
             'name'             => $name,
             'metadata[coach_id]' => $coachId,
+        ]);
+    }
+
+    public function updateCustomerBillingDetails(string $customerId, array $billing, string $coachId): array
+    {
+        $name = trim(($billing['first_name'] ?? '') . ' ' . ($billing['last_name'] ?? ''));
+        return $this->request('POST', "/customers/{$customerId}", [
+            'email' => $billing['email'] ?? '',
+            'name' => $name ?: ($billing['company'] ?? ''),
+            'phone' => $billing['phone'] ?? '',
+            'address[line1]' => $billing['address'] ?? '',
+            'address[postal_code]' => $billing['postal_code'] ?? '',
+            'address[city]' => $billing['city'] ?? '',
+            'address[country]' => strtoupper((string) ($billing['country'] ?? '')),
+            'metadata[coach_id]' => $coachId,
+            'metadata[company]' => $billing['company'] ?? '',
+            'metadata[vat_id]' => $billing['vat_id'] ?? '',
         ]);
     }
 
@@ -139,6 +155,11 @@ class StripeService
             'customer'   => $customerId,
             'return_url' => "{$frontendUrl}/billing",
         ]);
+    }
+
+    public function getCheckoutSession(string $sessionId): array
+    {
+        return $this->request('GET', "/checkout/sessions/{$sessionId}");
     }
 
     public function getSubscription(string $subscriptionId): array

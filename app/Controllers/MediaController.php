@@ -113,7 +113,7 @@ class MediaController
     // GET /coach/media/:clientId (coach)
     public function clientMedia(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = new ObjectId($params['clientId']);
 
         // Verify ownership
@@ -183,7 +183,7 @@ class MediaController
     // POST /coach/clients/:id/measurements
     public function storeMeasurement(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = new ObjectId($params['id']);
         $client   = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $coachId]);
         if (!$client) Response::error('Client not found', 404);

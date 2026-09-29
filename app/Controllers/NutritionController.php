@@ -48,7 +48,7 @@ class NutritionController
     // POST /nutrition-plans
     public function store(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, [
             'client_id'  => 'required',
@@ -106,7 +106,29 @@ class NutritionController
             'updated_at'   => new \MongoDB\BSON\UTCDateTime(),
         ]);
 
-        Response::success(['id' => (string) $result->getInsertedId()], 'Nutrition plan created', 201);
+        $planId  = (string) $result->getInsertedId();
+        $planTitle = $body['title'];
+
+        // Notify assigned clients (in-app + push)
+        $triggerService = new NotificationTriggerService();
+        foreach ($clientObjects as $c) {
+            try {
+                $triggerService->notifyClientNewPlan($planTitle, $planId, (string) $c['_id'], 'nutrition');
+            } catch (\Throwable $e) {
+                error_log('Failed to send new nutrition plan notification to client ' . (string) $c['_id'] . ': ' . $e->getMessage());
+            }
+        }
+
+        foreach ($clientObjects as $c) {
+            \App\Services\ActivityLogService::log(
+                'nutrition_plan_created',
+                (string) $c['_id'],
+                $c['name'] ?? null,
+                ['plan_id' => $planId, 'title' => $planTitle]
+            );
+        }
+
+        Response::success(['id' => $planId], 'Nutrition plan created', 201);
     }
 
     // GET /nutrition-plans/:id
@@ -150,6 +172,33 @@ class NutritionController
         }
 
         ScopedCollection::for('nutrition_plans')->updateOne(['_id' => $plan['_id']], ['$set' => $set]);
+
+        // Fetch the updated plan to ensure notifications use the latest data
+        $updatedPlan = ScopedCollection::for('nutrition_plans')->findOne(['_id' => $plan['_id']]);
+
+        // Notify assigned client(s) that the plan was updated
+        $triggerService = new NotificationTriggerService();
+        $planTitle      = $updatedPlan['title'] ?? 'Your plan';
+        $planIdStr      = (string) $plan['_id'];
+
+        if (!empty($updatedPlan['client_id'])) {
+            try {
+                $triggerService->notifyClientPlanUpdated($planTitle, $planIdStr, (string) $updatedPlan['client_id'], 'nutrition');
+            } catch (\Throwable $e) {
+                error_log('Failed to send nutrition-plan-updated notification: ' . $e->getMessage());
+            }
+        }
+
+        if (!empty($updatedPlan['client_ids'])) {
+            foreach ($updatedPlan['client_ids'] as $cid) {
+                try {
+                    $triggerService->notifyClientPlanUpdated($planTitle, $planIdStr, (string) $cid, 'nutrition');
+                } catch (\Throwable $e) {
+                    error_log('Failed to send nutrition-plan-updated notification to client ' . (string) $cid . ': ' . $e->getMessage());
+                }
+            }
+        }
+
         Response::success(null, 'Nutrition plan updated');
     }
 
@@ -227,6 +276,26 @@ class NutritionController
             ['_id' => $planId],
             ['$set' => $update]
         );
+
+        // Notify all assigned clients (in-app + push)
+        $triggerService = new NotificationTriggerService();
+        $planTitle = $plan['title'] ?? 'Your plan';
+        foreach ($clientObjects as $client) {
+            try {
+                $triggerService->notifyClientNewPlan($planTitle, (string) $planId, (string) $client['_id'], 'nutrition');
+            } catch (\Throwable $e) {
+                error_log('Failed to send nutrition assignment notification to client ' . (string) $client['_id'] . ': ' . $e->getMessage());
+            }
+        }
+
+        foreach ($clientObjects as $client) {
+            \App\Services\ActivityLogService::log(
+                'nutrition_plan_assigned',
+                (string) $client['_id'],
+                $client['name'] ?? null,
+                ['plan_id' => (string) $planId, 'title' => $plan['title'] ?? null]
+            );
+        }
 
         Response::success([
             'client_ids' => array_map(fn($c) => (string) $c['_id'], $clientObjects),

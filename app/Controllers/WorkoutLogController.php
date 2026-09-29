@@ -203,7 +203,7 @@ class WorkoutLogController
     // GET /coach/clients/:id/logs (coach view)
     public function clientLogs(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = new ObjectId($params['id']);
 
         // Verify the client belongs to this coach (IDOR fix)
@@ -342,6 +342,15 @@ class WorkoutLogController
         Response::success($result);
     }
 
+    private function sanitizeTitle(mixed $title): string
+    {
+        $str = is_string($title) ? trim($title) : '';
+        if ($str === '' || preg_match('/^[a-f0-9]{24}$/i', $str)) {
+            return 'Untitled Plan';
+        }
+        return $str;
+    }
+
     private function formatPlan(object $doc, array $memberMap = []): array
     {
         $clientIds = [];
@@ -358,7 +367,7 @@ class WorkoutLogController
 
         return [
             'id'         => (string) $doc['_id'],
-            'title'      => $doc['title'],
+            'title'      => $this->sanitizeTitle($doc['title']),
             'plan_type'  => (string) ($doc['plan_type'] ?? 'individual'),
             'group_name' => $doc['group_name'] ?? null,
             'client_ids' => $clientIds,
@@ -384,7 +393,7 @@ class WorkoutLogController
     // GET /coach/clients/:id/live-progress (coach real-time dashboard card)
     public function liveProgress(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = $params['id'] ?? '';
 
         if (!preg_match('/^[a-f0-9]{24}$/i', $clientId)) {
@@ -435,7 +444,7 @@ class WorkoutLogController
 
             $planResponse = [
                 'id'             => $planId,
-                'title'          => $activePlan['title'] ?? '',
+                'title'          => $this->sanitizeTitle($activePlan['title'] ?? ''),
                 'progress_pct'   => $totalDays > 0 ? round(($doneCount / $totalDays) * 100, 1) : 0,
                 'total_days'     => $totalDays,
                 'completed_days' => $doneCount,
@@ -487,7 +496,7 @@ class WorkoutLogController
     // GET /coach/clients/:id/workout-progress (coach view — grouped completed vs in-progress)
     public function clientWorkoutProgress(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = new ObjectId($params['id']);
 
         // Verify the client belongs to this coach (IDOR fix)
@@ -533,7 +542,7 @@ class WorkoutLogController
 
             $planData = [
                 'id'              => $planId,
-                'title'           => $plan['title'],
+                'title'           => $this->sanitizeTitle($plan['title']),
                 'week_start'      => $plan['week_start'] ? date('Y-m-d', (int)(((string)$plan['week_start']) / 1000)) : null,
                 'status'          => $plan['status'],
                 'total_days'      => $totalDays,

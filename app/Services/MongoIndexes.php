@@ -19,6 +19,17 @@ class MongoIndexes
         // coaches
         $db->getCollection('coaches')->createIndexes([
             ['key' => ['email' => 1], 'unique' => true],
+            ['key' => ['stripe_customer_id' => 1], 'unique' => true, 'sparse' => true],
+            ['key' => ['stripe_subscription_id' => 1], 'unique' => true, 'sparse' => true],
+            ['key' => ['subscription_status' => 1, 'subscription_period_end' => 1]],
+            ['key' => ['subscription_tier' => 1, 'subscription_status' => 1]],
+            ['key' => ['trial_ends_at' => 1, 'subscription_status' => 1]],
+        ]);
+
+        // Stripe event receipt and retry-safe webhook idempotency.
+        $db->getCollection('stripe_webhook_events')->createIndexes([
+            ['key' => ['event_id' => 1], 'unique' => true],
+            ['key' => ['type' => 1, 'received_at' => -1]],
         ]);
 
         // clients
@@ -27,6 +38,7 @@ class MongoIndexes
             ['key' => ['coach_id' => 1, 'active' => 1]],
             ['key' => ['coach_id' => 1, 'is_blocked' => 1]],
             ['key' => ['coach_id' => 1, 'deleted_at' => 1]],
+            ['key' => ['coach_id' => 1, 'name' => 1]],
             ['key' => ['email' => 1]],
             ['key' => ['phone' => 1]],
             ['key' => ['login_code_hash' => 1]],
@@ -54,6 +66,24 @@ class MongoIndexes
             ['key' => ['name' => 'text']],
             ['key' => ['coach_id' => 1]],
             ['key' => ['source' => 1, 'fdc_id' => 1], 'unique' => true, 'sparse' => true],
+            ['key' => ['stale_at' => 1, 'refresh_status' => 1]],
+        ]);
+
+        // cache_refresh_jobs (nutrition cache background refresh queue)
+        $db->getCollection('cache_refresh_jobs')->createIndexes([
+            ['key' => ['status' => 1, 'requested_at' => 1]],
+            ['key' => ['food_id' => 1, 'source' => 1]],
+        ]);
+
+        // wearable_trend_cache (wearable trend cache)
+        $db->getCollection('wearable_trend_cache')->createIndexes([
+            ['key' => ['client_id' => 1, 'metric' => 1, 'window_days' => 1], 'unique' => true],
+        ]);
+
+        // wearable_sync_jobs (wearable trend cache background refresh queue)
+        $db->getCollection('wearable_sync_jobs')->createIndexes([
+            ['key' => ['status' => 1, 'requested_at' => 1]],
+            ['key' => ['client_id' => 1, 'type' => 1]],
         ]);
 
         // checkin_meetings
@@ -77,6 +107,73 @@ class MongoIndexes
             ['key' => ['client_id' => 1, 'recorded_at' => -1]],
         ]);
 
+        // workout_plans
+        $db->getCollection('workout_plans')->createIndexes([
+            ['key' => ['client_ids' => 1]],
+        ]);
+
+        // workout_logs
+        $db->getCollection('workout_logs')->createIndexes([
+            ['key' => ['workout_plan_id' => 1]],
+        ]);
+
+        // nutrition_plans
+        $db->getCollection('nutrition_plans')->createIndexes([
+            ['key' => ['client_ids' => 1]],
+            ['key' => ['coach_id' => 1]],
+        ]);
+
+        // checkin_meetings
+        $db->getCollection('checkin_meetings')->createIndexes([
+            ['key' => ['client_id' => 1, 'status' => 1]],
+        ]);
+
+        // message_typing_status
+        $db->getCollection('message_typing_status')->createIndexes([
+            ['key' => ['coach_id' => 1, 'client_id' => 1], 'unique' => true],
+            ['key' => ['updated_at' => 1], 'expireAfterSeconds' => 30],
+        ]);
+
+        // group_messages
+        $db->getCollection('group_messages')->createIndexes([
+            ['key' => ['plan_id' => 1, 'sent_at' => 1]],
+        ]);
+
+        // refresh_tokens
+        $db->getCollection('refresh_tokens')->createIndexes([
+            ['key' => ['token_hash' => 1], 'unique' => true],
+            ['key' => ['expires_at' => 1], 'expireAfterSeconds' => 0],
+        ]);
+
+        // live_training_sessions
+        $db->getCollection('live_training_sessions')->createIndexes([
+            ['key' => ['coach_id' => 1, 'status' => 1]],
+            ['key' => ['scheduled_at' => 1]],
+        ]);
+
+        // live_training_requests
+        $db->getCollection('live_training_requests')->createIndexes([
+            ['key' => ['session_id' => 1, 'client_id' => 1], 'unique' => true],
+        ]);
+
+        // live_training_chat
+        $db->getCollection('live_training_chat')->createIndexes([
+            ['key' => ['session_id' => 1, 'sent_at' => 1]],
+        ]);
+
+        // notifications
+        $db->getCollection('notifications')->createIndexes([
+            ['key' => ['user_id' => 1, 'read' => 1]],
+            ['key' => ['user_id' => 1, 'user_type' => 1, 'read' => 1]],
+            ['key' => ['user_id' => 1, 'sent_at' => -1]],
+            ['key' => ['user_id' => 1, 'user_type' => 1, 'sent_at' => -1]],
+        ]);
+
+        // rate_limits
+        $db->getCollection('rate_limits')->createIndexes([
+            ['key' => ['expires_at' => 1], 'expireAfterSeconds' => 0],
+        ]);
+
         echo "All indexes created successfully.\n";
 
         // ── New feature indexes ────────────────────────────────────────────────────
@@ -91,11 +188,26 @@ class MongoIndexes
         $db->getCollection('wearable_data')->createIndexes([
             ['key' => ['client_id' => 1, 'date' => -1]],
             ['key' => ['client_id' => 1, 'date' => 1], 'unique' => true],
+            ['key' => ['client_id' => 1, 'recovery_score' => -1]],
         ]);
 
         // wearable_tokens (encrypted OAuth tokens per client per provider)
         $db->getCollection('wearable_tokens')->createIndexes([
             ['key' => ['client_id' => 1, 'provider' => 1], 'unique' => true],
+            ['key' => ['provider' => 1, 'status' => 1]],
+            ['key' => ['last_sync_at' => 1]],
+        ]);
+
+        // wearable_connections (pairing state + per-metric privacy settings)
+        $db->getCollection('wearable_connections')->createIndexes([
+            ['key' => ['client_id' => 1, 'provider' => 1], 'unique' => true],
+            ['key' => ['status' => 1, 'provider' => 1]],
+        ]);
+
+        // wearable_sessions (device workout sessions imported from Fitbit / Apple Watch)
+        $db->getCollection('wearable_sessions')->createIndexes([
+            ['key' => ['client_id' => 1, 'start_time' => -1]],
+            ['key' => ['client_id' => 1, 'provider' => 1, 'session_id' => 1], 'unique' => true],
         ]);
 
         // wearable_oauth_states (short-lived CSRF state tokens)

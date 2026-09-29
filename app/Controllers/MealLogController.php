@@ -108,7 +108,10 @@ class MealLogController
      */
     public function clientLogs(array $params): void
     {
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = new ObjectId($params['id']);
+
+        $this->assertCoachOwnsClient($coachId, $clientId);
 
         $filter = ['client_id' => $clientId];
 
@@ -141,7 +144,9 @@ class MealLogController
      */
     public function adherence(array $params): void
     {
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId  = new ObjectId($params['id']);
+        $this->assertCoachOwnsClient($coachId, $clientId);
         $fromTs    = Request::get('from') ? strtotime(Request::get('from')) : strtotime('-30 days');
         $toTs      = Request::get('to')   ? strtotime(Request::get('to'))   : time();
         $fromBson  = new UTCDateTime($fromTs * 1000);
@@ -186,5 +191,14 @@ class MealLogController
             'meal_name'          => $d['meal_name'] ?? '',
             'completed_at'       => isset($d['completed_at']) ? (string) $d['completed_at'] : null,
         ];
+    }
+
+    private function assertCoachOwnsClient(ObjectId $coachId, ObjectId $clientId): void
+    {
+        $client = Database::collection('clients')->findOne([
+            '_id' => $clientId,
+            'coach_id' => $coachId,
+        ]);
+        if (!$client) Response::error('Client not found', 404);
     }
 }

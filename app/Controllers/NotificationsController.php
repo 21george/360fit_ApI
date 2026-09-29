@@ -133,7 +133,7 @@ class NotificationsController
     public function index(array $params): void
     {
         try {
-            $coachId = new ObjectId($params['_auth']['sub']);
+            $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
         }
@@ -175,7 +175,7 @@ class NotificationsController
     public function unreadCount(array $params): void
     {
         try {
-            $coachId = new ObjectId($params['_auth']['sub']);
+            $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
         }
@@ -197,7 +197,7 @@ class NotificationsController
     public function markRead(array $params): void
     {
         try {
-            $coachId = new ObjectId($params['_auth']['sub']);
+            $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
         }
@@ -229,7 +229,7 @@ class NotificationsController
     public function markAllRead(array $params): void
     {
         try {
-            $coachId = new ObjectId($params['_auth']['sub']);
+            $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
         }
@@ -251,7 +251,7 @@ class NotificationsController
     public function destroy(array $params): void
     {
         try {
-            $coachId = new ObjectId($params['_auth']['sub']);
+            $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         } catch (\MongoDB\Driver\Exception\InvalidArgumentException) {
             Response::error('Invalid user id', 400);
         }

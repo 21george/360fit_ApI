@@ -2,12 +2,17 @@
 declare(strict_types=1);
 
 use App\Controllers\NotificationsController;
-use App\Middleware\CoachMiddleware;
+use App\Middleware\{StaffMiddleware, ClientMiddleware};
 
-// Notifications are a coach-owned resource; require a coach token
-// and populate RequestContext so RLS can scope by coach_id.
-$router->get('/notifications', [NotificationsController::class, 'index'], [CoachMiddleware::class]);
-$router->get('/notifications/unread-count', [NotificationsController::class, 'unreadCount'], [CoachMiddleware::class]);
-$router->post('/notifications/:id/read', [NotificationsController::class, 'markRead'], [CoachMiddleware::class]);
-$router->post('/notifications/read-all', [NotificationsController::class, 'markAllRead'], [CoachMiddleware::class]);
-$router->delete('/notifications/:id', [NotificationsController::class, 'destroy'], [CoachMiddleware::class]);
+// ── Coach notifications ────────────────────────────────────────────────────
+$router->get('/notifications', [NotificationsController::class, 'index'], [StaffMiddleware::class]);
+$router->get('/notifications/unread-count', [NotificationsController::class, 'unreadCount'], [StaffMiddleware::class]);
+$router->post('/notifications/:id/read', [NotificationsController::class, 'markRead'], [StaffMiddleware::class]);
+$router->post('/notifications/read-all', [NotificationsController::class, 'markAllRead'], [StaffMiddleware::class]);
+$router->delete('/notifications/:id', [NotificationsController::class, 'destroy'], [StaffMiddleware::class]);
+
+// ── Client notifications ─────────────────────────────────────────────────────
+$router->get('/client/notifications', [NotificationsController::class, 'clientIndex'], [ClientMiddleware::class]);
+$router->get('/client/notifications/unread-count', [NotificationsController::class, 'clientUnreadCount'], [ClientMiddleware::class]);
+$router->post('/client/notifications/:id/read', [NotificationsController::class, 'clientMarkRead'], [ClientMiddleware::class]);
+$router->post('/client/notifications/read-all', [NotificationsController::class, 'clientMarkAllRead'], [ClientMiddleware::class]);

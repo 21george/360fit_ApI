@@ -9,6 +9,21 @@ use MongoDB\BSON\ObjectId;
 /**
  * Row-Level Security scope configuration.
  * Maps MongoDB collections to ownership fields for each user role.
+ *
+ * Usage guideline:
+ *   - Use ScopedCollection::for('name') when the collection has an RLS entry
+ *     for the current role AND the endpoint only operates on that role's own
+ *     data.  The ownership filter is injected automatically.
+ *   - Use Database::collection('name') directly when:
+ *       1. No auth context exists yet (login, register, public endpoints).
+ *       2. The collection is not in OWNERSHIP_MAP.
+ *       3. The caller is a coach but the collection is client-owned
+ *          (workout_logs, messages, notifications) — the coach must query
+ *          by explicit client_id instead.
+ *       4. The query is an aggregation with complex $match stages that RLS
+ *          would incorrectly narrow.
+ *   - When using direct Database::collection() on a collection that IS in the
+ *     map, add an inline comment explaining why ScopedCollection is bypassed.
  */
 class RlsScope
 {
@@ -26,26 +41,26 @@ class RlsScope
      */
     private const OWNERSHIP_MAP = [
         /* ── Coach-owned resources ───────────────────────────────────────── */
-        'clients'              => ['coach' => 'coach_id',           'client' => '_id'],
-        'workout_plans'        => ['coach' => 'coach_id',           'client' => [self::class, 'workoutPlansClientFilter']],
-        'nutrition_plans'      => ['coach' => 'coach_id',           'client' => [self::class, 'nutritionPlansClientFilter']],
-        'checkin_meetings'     => ['coach' => 'coach_id',           'client' => 'client_id'],
-        'coaching_sessions'    => ['coach' => 'coach_id',           'client' => 'client_id'],
-        'live_training_sessions' => ['coach' => 'coach_id',         'client' => [self::class, 'liveTrainingClientFilter']],
-        'foods'                  => ['coach' => null,               'client' => null], // public cache + manual custom-food scoping
+        'clients'              => ['coach' => 'coach_id',           'staff' => 'coach_id',           'client' => '_id'],
+        'workout_plans'        => ['coach' => 'coach_id',           'staff' => 'coach_id',           'client' => [self::class, 'workoutPlansClientFilter']],
+        'nutrition_plans'      => ['coach' => 'coach_id',           'staff' => 'coach_id',           'client' => [self::class, 'nutritionPlansClientFilter']],
+        'checkin_meetings'     => ['coach' => 'coach_id',           'staff' => 'coach_id',           'client' => 'client_id'],
+        'coaching_sessions'    => ['coach' => 'coach_id',           'staff' => 'coach_id',           'client' => 'client_id'],
+        'live_training_sessions' => ['coach' => 'coach_id',         'staff' => 'coach_id',           'client' => [self::class, 'liveTrainingClientFilter']],
+        'foods'                  => ['coach' => null,               'staff' => null,                 'client' => null], // public cache + manual custom-food scoping
 
         /* ── Client-owned resources (coach has no direct access) ─────────── */
-        'workout_logs'         => ['coach' => null,                 'client' => 'client_id'],
-        'body_measurements'    => ['coach' => null,                 'client' => 'client_id'],
-        'media_uploads'        => ['coach' => null,                 'client' => 'client_id'],
-        'messages'             => ['coach' => null,                 'client' => 'client_id'],
-        'notifications'        => ['coach' => null,                 'client' => 'client_id'],
-        'message_typing_status'=> ['coach' => null,                 'client' => 'client_id'],
+        'workout_logs'         => ['coach' => null,                 'staff' => null,                 'client' => 'client_id'],
+        'body_measurements'    => ['coach' => null,                 'staff' => null,                 'client' => 'client_id'],
+        'media_uploads'        => ['coach' => null,                 'staff' => null,                 'client' => 'client_id'],
+        'messages'             => ['coach' => null,                 'staff' => null,                 'client' => 'client_id'],
+        'notifications'        => ['coach' => null,                 'staff' => null,                 'client' => 'client_id'],
+        'message_typing_status'=> ['coach' => null,                 'staff' => null,                 'client' => 'client_id'],
 
         /* ── Self resources ────────────────────────────────────────────── */
-        'coaches'              => ['coach' => '_id',                'client' => null],
-        'refresh_tokens'       => ['coach' => null,                 'client' => null], // handled separately
-        'rate_limits'          => ['coach' => null,                 'client' => null], // handled separately
+        'coaches'              => ['coach' => '_id',                'staff' => null,                 'client' => null],
+        'refresh_tokens'       => ['coach' => null,                 'staff' => null,                 'client' => null], // handled separately
+        'rate_limits'          => ['coach' => null,                 'staff' => null,                 'client' => null], // handled separately
     ];
 
     /**
@@ -72,6 +87,22 @@ class RlsScope
 
         if ($field === null) {
             return null; // Role has no default access to this collection
+        }
+
+        // Staff JWTs are scoped by org_id (coach_id), not the individual staff sub
+        if ($role === 'staff') {
+            $orgId = RequestContext::getCoachId();
+            if (!$orgId) {
+                return null;
+            }
+            $oid = self::safeObjectId($orgId);
+            if ($oid === null) {
+                return null;
+            }
+            if (is_callable($field)) {
+                return $field($oid);
+            }
+            return [$field => $oid];
         }
 
         $oid = self::safeObjectId($userId);

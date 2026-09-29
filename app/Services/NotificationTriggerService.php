@@ -34,7 +34,7 @@ class NotificationTriggerService
         if (!$coach) return;
 
         $notification = [
-            'user_id' => new ObjectId($coach['_id']),
+            'user_id' => $coach['_id'],
             'user_type' => 'coach',
             'type' => 'workout_completed',
             'title' => 'Workout Completed',
@@ -63,7 +63,7 @@ class NotificationTriggerService
         if (!$coach) return;
 
         $notification = [
-            'user_id' => new ObjectId($coach['_id']),
+            'user_id' => $coach['_id'],
             'user_type' => 'coach',
             'type' => 'new_message',
             'title' => 'New Message',
@@ -92,7 +92,7 @@ class NotificationTriggerService
 
         $fieldList = implode(', ', $changedFields);
         $notification = [
-            'user_id' => new ObjectId($coach['_id']),
+            'user_id' => $coach['_id'],
             'user_type' => 'coach',
             'type' => 'profile_updated',
             'title' => 'Profile Updated',
@@ -132,7 +132,7 @@ class NotificationTriggerService
             $this->getScheduledCollection()->insertOne([
                 'notification_type' => 'checkin_reminder',
                 'target_id' => new ObjectId($checkinId),
-                'user_id' => new ObjectId($coach['_id']),
+                'user_id' => $coach['_id'],
                 'client_id' => new ObjectId($clientId),
                 'client_name' => $clientName,
                 'scheduled_for' => $reminderTime,
@@ -155,7 +155,7 @@ class NotificationTriggerService
 
         $formattedTime = date('M j, g:i A', strtotime($scheduledAt));
         $notification = [
-            'user_id' => new ObjectId($coach['_id']),
+            'user_id' => $coach['_id'],
             'user_type' => 'coach',
             'type' => 'checkin_reminder',
             'title' => 'Check-in Reminder',
@@ -340,49 +340,157 @@ class NotificationTriggerService
     /**
      * Notify client when a new workout plan is assigned to them
      */
-    public function notifyClientNewPlan(string $planTitle, string $planId, string $clientId): void
+    public function notifyClientNewPlan(string $planTitle, string $planId, string $clientId, string $planType = 'workout'): void
     {
+        $typeLabels = [
+            'workout' => 'Workout Plan',
+            'nutrition' => 'Nutrition Plan',
+        ];
+        $label = $typeLabels[$planType] ?? 'Plan';
+        $data  = [
+            'planId'    => $planId,
+            'planTitle' => $planTitle,
+            'planType'  => $planType,
+        ];
+
         $notification = [
             'user_id'    => new ObjectId($clientId),
             'user_type'  => 'client',
-            'type'       => 'new_workout_plan',
-            'title'      => 'New Workout Plan',
-            'body'       => "Your new workout plan \"{$planTitle}\" is ready!",
-            'data'       => [
-                'planId'    => $planId,
-                'planTitle' => $planTitle,
-            ],
+            'type'       => "new_{$planType}_plan",
+            'title'      => "New {$label}",
+            'body'       => "Your new {$label} \"{$planTitle}\" is ready!",
+            'data'       => $data,
             'read'       => false,
             'sent_at'    => new UTCDateTime(),
             'created_at' => new UTCDateTime(),
         ];
 
         $this->collection->insertOne($notification);
-        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $data);
     }
 
     /**
      * Notify client when their assigned workout plan is updated
      */
-    public function notifyClientPlanUpdated(string $planTitle, string $planId, string $clientId): void
+    public function notifyClientPlanUpdated(string $planTitle, string $planId, string $clientId, string $planType = 'workout'): void
     {
+        $typeLabels = [
+            'workout' => 'Workout Plan',
+            'nutrition' => 'Nutrition Plan',
+        ];
+        $label = $typeLabels[$planType] ?? 'Plan';
+        $data  = [
+            'planId'    => $planId,
+            'planTitle' => $planTitle,
+            'planType'  => $planType,
+        ];
+
         $notification = [
             'user_id'    => new ObjectId($clientId),
             'user_type'  => 'client',
-            'type'       => 'workout_plan_updated',
-            'title'      => 'Workout Plan Updated',
-            'body'       => "Your workout plan \"{$planTitle}\" has been updated.",
-            'data'       => [
-                'planId'    => $planId,
-                'planTitle' => $planTitle,
-            ],
+            'type'       => "{$planType}_plan_updated",
+            'title'      => "{$label} Updated",
+            'body'       => "Your {$label} \"{$planTitle}\" has been updated.",
+            'data'       => $data,
             'read'       => false,
             'sent_at'    => new UTCDateTime(),
             'created_at' => new UTCDateTime(),
         ];
 
         $this->collection->insertOne($notification);
-        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $data);
+    }
+
+    /**
+     * Notify client when their coach schedules a check-in
+     */
+    public function notifyClientCheckinScheduled(string $clientId, string $checkinId, string $scheduledAt, string $type = 'chat'): void
+    {
+        $formattedTime = date('D M j, g:i A', strtotime($scheduledAt));
+        $typeLabels = [
+            'call' => 'Call',
+            'video' => 'Video',
+            'chat' => 'Chat',
+        ];
+        $typeLabel = $typeLabels[$type] ?? 'Check-in';
+        $data = [
+            'checkinId' => $checkinId,
+            'scheduledAt' => $scheduledAt,
+            'type' => $type,
+        ];
+
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'checkin_scheduled',
+            'title'      => 'New Check-in Scheduled',
+            'body'       => "Your coach scheduled a {$typeLabel} for {$formattedTime}.",
+            'data'       => $data,
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $data);
+    }
+
+    /**
+     * Notify coach that a client requested to join a live training session
+     */
+    public function notifyCoachLiveRequest(string $coachId, string $sessionId, string $sessionTitle, string $clientId, string $clientName): void
+    {
+        $data = [
+            'sessionId'   => $sessionId,
+            'sessionTitle'=> $sessionTitle,
+            'clientId'    => $clientId,
+            'clientName'  => $clientName,
+        ];
+
+        $notification = [
+            'user_id'    => new ObjectId($coachId),
+            'user_type'  => 'coach',
+            'type'       => 'live_training_request',
+            'title'      => 'New Join Request',
+            'body'       => "{$clientName} requested to join \"{$sessionTitle}\".",
+            'data'       => $data,
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToCoach(new ObjectId($coachId), $notification['title'], $notification['body'], $data);
+    }
+
+    /**
+     * Notify client that their live training request was approved or rejected
+     */
+    public function notifyClientLiveRequestStatus(string $clientId, string $sessionId, string $sessionTitle, string $status): void
+    {
+        $isApproved = $status === 'approved';
+        $data = [
+            'sessionId'   => $sessionId,
+            'sessionTitle'=> $sessionTitle,
+            'status'      => $status,
+        ];
+
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'live_training_request_' . $status,
+            'title'      => $isApproved ? 'Join Request Approved' : 'Join Request Declined',
+            'body'       => $isApproved
+                ? "You're in! See you at \"{$sessionTitle}\"."
+                : "Your request to join \"{$sessionTitle}\" was declined.",
+            'data'       => $data,
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $data);
     }
 
     /**

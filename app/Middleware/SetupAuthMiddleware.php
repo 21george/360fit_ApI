@@ -31,7 +31,7 @@ class SetupAuthMiddleware
         // Verify coach is in pending subscription state
         $subscriptionStatus = $coach['subscription_status'] ?? 'none';
         if ($subscriptionStatus !== 'pending' && $subscriptionStatus !== 'none') {
-            Response::error('Subscription already configured', 409);
+            Response::error('Subscription already configured (status: ' . $subscriptionStatus . ').', 409);
         }
 
         // Inject auth data into params

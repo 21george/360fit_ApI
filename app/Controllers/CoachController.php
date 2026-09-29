@@ -5,6 +5,7 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Helpers\{Request, Response, Diff, ScopedCollection};
+use App\Services\ProfilePhotoService;
 use MongoDB\BSON\ObjectId;
 use MongoDB\BSON\UTCDateTime;
 
@@ -111,76 +112,38 @@ class CoachController {
         $coachId    = $params['_auth']['sub'];
         $coachIdObj = new ObjectId($coachId);
         $ext        = (string) Request::get('ext', 'jpg');
-        $allowed    = ['jpg', 'jpeg', 'png', 'webp'];
-        if (!in_array(strtolower($ext), $allowed)) {
+
+        if (!ProfilePhotoService::validateExt($ext)) {
             Response::error('Invalid file type. Allowed: jpg, jpeg, png, webp', 422);
         }
 
-        // Delete old photo first
         $coach = ScopedCollection::for('coaches')->findOne(
             ['_id' => $coachIdObj],
             ['projection' => ['profile_photo_key' => 1]]
         );
-        $this->deletePhotoByKey($coach['profile_photo_key'] ?? null);
 
-        $uuid = bin2hex(random_bytes(8));
-
-        if (\App\Services\S3Service::isConfigured()) {
-            // --- S3 mode: generate presigned URLs ---
-            $mimeMap = ['jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'webp' => 'image/webp'];
-            $mime    = $mimeMap[strtolower($ext)] ?? 'image/jpeg';
-            $key     = "coaches/{$coachId}/profile/{$uuid}.{$ext}";
-
-            $uploadUrl = \App\Services\S3Service::getPresignedUploadUrl($key, $mime);
-            $readUrl   = \App\Services\S3Service::getPresignedDownloadUrl($key, 1440);
-
-            ScopedCollection::for('coaches')->updateOne(
-                ['_id' => $coachIdObj],
-                ['$set' => [
-                    'profile_photo'     => $readUrl,
-                    'profile_photo_key' => $key,
-                    'updated_at'        => new UTCDateTime(),
-                ]]
-            );
-
-            Response::success([
-                'upload_url'    => $uploadUrl,
-                'profile_photo' => $readUrl,
-                'key'           => $key,
-            ], 'Upload URL generated');
-        } else {
-            // --- Local mode: save uploaded file directly ---
-            if (empty($_FILES['photo']['tmp_name'])) {
-                Response::error('No photo file provided', 422);
-            }
-            $relPath = "uploads/coaches/{$coachId}";
-            $dir     = BASE_PATH . '/public/' . $relPath;
-            if (!is_dir($dir)) mkdir($dir, 0755, true);
-
-            $filename = "{$uuid}.{$ext}";
-            $dest     = "{$dir}/{$filename}";
-
-            if (!move_uploaded_file($_FILES['photo']['tmp_name'], $dest)) {
-                Response::error('Failed to save photo', 500);
-            }
-
-            $appUrl   = rtrim($_ENV['APP_URL'] ?? 'http://localhost:8000', '/');
-            $photoUrl = "{$appUrl}/{$relPath}/{$filename}";
-            $localKey = "local:{$relPath}/{$filename}";
-
-            ScopedCollection::for('coaches')->updateOne(
-                ['_id' => $coachIdObj],
-                ['$set' => [
-                    'profile_photo'     => $photoUrl,
-                    'profile_photo_key' => $localKey,
-                    'updated_at'        => new UTCDateTime(),
-                ]]
-            );
-
-            Response::success([
-                'profile_photo' => $photoUrl,
-            ], 'Photo uploaded');
+        try {
+            $result = ProfilePhotoService::upload($coachId, 'coaches', $ext, $coach['profile_photo_key'] ?? null);
+        } catch (\RuntimeException $e) {
+            Response::error($e->getMessage(), $e->getMessage() === 'No photo file provided' ? 422 : 500);
         }
+
+        ScopedCollection::for('coaches')->updateOne(
+            ['_id' => $coachIdObj],
+            ['$set' => [
+                'profile_photo'     => $result['url'],
+                'profile_photo_key' => $result['key'],
+                'updated_at'        => new UTCDateTime(),
+            ]]
+        );
+
+        $response = ['profile_photo' => $result['url']];
+        if (isset($result['upload_url'])) {
+            $response['upload_url'] = $result['upload_url'];
+            $response['key']        = $result['key'];
+        }
+
+        Response::success($response, isset($result['upload_url']) ? 'Upload URL generated' : 'Photo uploaded');
     }
 
     public function deletePhoto(array $params): void {
@@ -191,7 +154,7 @@ class CoachController {
             ['projection' => ['profile_photo_key' => 1]]
         );
 
-        $this->deletePhotoByKey($coach['profile_photo_key'] ?? null);
+        ProfilePhotoService::deleteByKey($coach['profile_photo_key'] ?? null);
 
         ScopedCollection::for('coaches')->updateOne(
             ['_id' => $coachIdObj],
@@ -271,27 +234,8 @@ class CoachController {
 
     private function resolveProfilePhoto(array $data, $record): array
     {
-        if (!empty($record['profile_photo_key'])) {
-            $key = (string) $record['profile_photo_key'];
-            if (str_starts_with($key, 'local:')) {
-                $appUrl = rtrim($_ENV['APP_URL'] ?? 'http://localhost:8000', '/');
-                $data['profile_photo'] = $appUrl . '/' . substr($key, 6);
-            } elseif (\App\Services\S3Service::isConfigured()) {
-                $data['profile_photo'] = \App\Services\S3Service::getPresignedDownloadUrl($key, 1440);
-            }
-        }
+        $data['profile_photo'] = ProfilePhotoService::resolveUrl($record['profile_photo_key'] ?? null) ?? $data['profile_photo'] ?? null;
         return $data;
-    }
-
-    private function deletePhotoByKey(?string $key): void
-    {
-        if (!$key) return;
-        if (str_starts_with($key, 'local:')) {
-            $path = BASE_PATH . '/public/' . substr($key, 6);
-            if (is_file($path)) @unlink($path);
-        } elseif (\App\Services\S3Service::isConfigured()) {
-            \App\Services\S3Service::delete($key);
-        }
     }
 
     private function getClientCount(string $coachId): int {

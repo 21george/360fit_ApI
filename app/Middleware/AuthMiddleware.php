@@ -22,9 +22,28 @@ class AuthMiddleware
             if ($secret === '') {
                 Response::error('Server configuration error', 500);
             }
-            $decoded = JWT::decode($token, new Key($secret, 'HS256'));
+            $decoded = (array) JWT::decode($token, new Key($secret, 'HS256'));
+
+            // For clients, the access token embeds a token_version. If a coach
+            // regenerates the login code (or blocks/deletes the client), the
+            // stored version is bumped and any in-flight access token must be
+            // rejected immediately, not just at refresh time.
+            if (($decoded['role'] ?? '') === 'client' && isset($decoded['token_version'])) {
+                $client = \App\Config\Database::collection('clients')->findOne([
+                    '_id' => new \MongoDB\BSON\ObjectId((string) $decoded['sub']),
+                ], ['projection' => ['token_version' => 1, 'active' => 1, 'is_blocked' => 1]]);
+
+                if (!$client || !($client['active'] ?? true) || ($client['is_blocked'] ?? false)) {
+                    Response::error('Client access blocked', 403);
+                }
+
+                if (((int) $decoded['token_version']) !== ((int) ($client['token_version'] ?? 0))) {
+                    Response::error('Session invalidated. Please log in again.', 401);
+                }
+            }
+
             // Inject auth data into params so controllers can access it
-            $params['_auth'] = (array) $decoded;
+            $params['_auth'] = $decoded;
         } catch (\Exception) {
             Response::error('Unauthorized', 401);
         }

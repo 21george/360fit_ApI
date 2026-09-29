@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Config\Database;
-use App\Helpers\{Request, Response};
+use App\Helpers\{Request, Response, ScopedCollection};
 use App\Services\{LiveKitService, NotificationTriggerService};
 use MongoDB\BSON\{ObjectId, UTCDateTime};
 
@@ -34,8 +34,8 @@ class CoachingSessionController
 
     public function index(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
-        $filter  = ['coach_id' => $coachId];
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
+        $filter  = [];
 
         $status   = Request::get('status');
         $clientId = Request::get('client_id');
@@ -47,7 +47,7 @@ class CoachingSessionController
             $filter['client_id'] = new ObjectId($clientId);
         }
 
-        $sessions = Database::collection('coaching_sessions')
+        $sessions = ScopedCollection::for('coaching_sessions')
             ->find($filter, ['sort' => ['scheduled_at' => -1]])
             ->toArray();
 
@@ -60,7 +60,7 @@ class CoachingSessionController
 
     public function show(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
         $map     = $this->buildClientMap([$session['client_id']]);
         Response::success($this->format($session, $map));
@@ -70,7 +70,7 @@ class CoachingSessionController
 
     public function store(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
 
         $errors = Request::validate($body, [
@@ -98,9 +98,8 @@ class CoachingSessionController
         $sessionOid = new ObjectId();
         $roomName   = LiveKitService::roomName((string) $sessionOid);
 
-        Database::collection('coaching_sessions')->insertOne([
+        ScopedCollection::for('coaching_sessions')->insertOne([
             '_id'          => $sessionOid,
-            'coach_id'     => $coachId,
             'client_id'    => $clientId,
             'title'        => trim($body['title']),
             'description'  => trim($body['description'] ?? ''),
@@ -130,6 +129,13 @@ class CoachingSessionController
             error_log('Coaching session notification failed: ' . $e->getMessage());
         }
 
+        \App\Services\ActivityLogService::log(
+            'coaching_session_created',
+            (string) $clientId,
+            $client['name'] ?? null,
+            ['session_id' => (string) $sessionOid, 'title' => trim($body['title'])]
+        );
+
         Response::success(['id' => (string) $sessionOid], 'Session created', 201);
     }
 
@@ -137,7 +143,7 @@ class CoachingSessionController
 
     public function update(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
         $body    = Request::body();
 
@@ -157,7 +163,7 @@ class CoachingSessionController
 
         if (!empty($set)) {
             $set['updated_at'] = new UTCDateTime();
-            Database::collection('coaching_sessions')->updateOne(
+            ScopedCollection::for('coaching_sessions')->updateOne(
                 ['_id' => $session['_id']],
                 ['$set' => $set]
             );
@@ -170,14 +176,14 @@ class CoachingSessionController
 
     public function destroy(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
 
         if ($session['status'] === 'live') {
             Response::error('Cannot delete a live session; end it first', 409);
         }
 
-        Database::collection('coaching_sessions')->deleteOne(['_id' => $session['_id']]);
+        ScopedCollection::for('coaching_sessions')->deleteOne(['_id' => $session['_id']]);
         Response::success(null, 'Session deleted');
     }
 
@@ -185,7 +191,7 @@ class CoachingSessionController
 
     public function updateStatus(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
         $body    = Request::body();
         $status  = $body['status'] ?? '';
@@ -198,7 +204,7 @@ class CoachingSessionController
         if ($status === 'live')  $set['started_at'] = new UTCDateTime();
         if ($status === 'ended') $set['ended_at']   = new UTCDateTime();
 
-        Database::collection('coaching_sessions')->updateOne(
+        ScopedCollection::for('coaching_sessions')->updateOne(
             ['_id' => $session['_id']],
             ['$set' => $set]
         );
@@ -224,7 +230,7 @@ class CoachingSessionController
 
     public function getToken(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
 
         if (!in_array($session['status'], ['upcoming', 'live'], true)) {
@@ -258,11 +264,11 @@ class CoachingSessionController
 
     public function saveNotes(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $session = $this->findSession($params['id'], $coachId);
         $body    = Request::body();
 
-        Database::collection('coaching_sessions')->updateOne(
+        ScopedCollection::for('coaching_sessions')->updateOne(
             ['_id' => $session['_id']],
             ['$set' => ['notes' => trim($body['notes'] ?? ''), 'updated_at' => new UTCDateTime()]]
         );
@@ -275,14 +281,14 @@ class CoachingSessionController
     public function clientIndex(array $params): void
     {
         $clientId = new ObjectId($params['_auth']['sub']);
-        $filter   = ['client_id' => $clientId];
+        $filter   = [];
 
         $status = Request::get('status');
         if ($status && in_array($status, self::STATUSES, true)) {
             $filter['status'] = $status;
         }
 
-        $sessions = Database::collection('coaching_sessions')
+        $sessions = ScopedCollection::for('coaching_sessions')
             ->find($filter, ['sort' => ['scheduled_at' => -1]])
             ->toArray();
 
@@ -308,9 +314,8 @@ class CoachingSessionController
             Response::error('Invalid session ID', 400);
         }
 
-        $session = Database::collection('coaching_sessions')->findOne([
-            '_id'       => new ObjectId($params['id']),
-            'client_id' => $clientId,
+        $session = ScopedCollection::for('coaching_sessions')->findOne([
+            '_id' => new ObjectId($params['id']),
         ]);
         if (!$session) Response::error('Session not found', 404);
 
@@ -330,9 +335,8 @@ class CoachingSessionController
             Response::error('Invalid session ID', 400);
         }
 
-        $session = Database::collection('coaching_sessions')->findOne([
-            '_id'       => new ObjectId($params['id']),
-            'client_id' => $clientId,
+        $session = ScopedCollection::for('coaching_sessions')->findOne([
+            '_id' => new ObjectId($params['id']),
         ]);
         if (!$session) Response::error('Session not found', 404);
 
@@ -370,9 +374,8 @@ class CoachingSessionController
         if (!preg_match('/^[a-f0-9]{24}$/', $id)) {
             Response::error('Invalid session ID', 400);
         }
-        $s = Database::collection('coaching_sessions')->findOne([
-            '_id'      => new ObjectId($id),
-            'coach_id' => $coachId,
+        $s = ScopedCollection::for('coaching_sessions')->findOne([
+            '_id' => new ObjectId($id),
         ]);
         if (!$s) Response::error('Session not found', 404);
         return (array) $s;

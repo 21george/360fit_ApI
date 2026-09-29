@@ -24,7 +24,7 @@ class WorkoutAnalysisController
     // GET /coach/clients/:id/workout-analyses
     public function index(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = $params['id'] ?? '';
 
         if (!preg_match('/^[a-f0-9]{24}$/i', $clientId)) {
@@ -72,7 +72,7 @@ class WorkoutAnalysisController
     // POST /coach/clients/:id/workout-analyses
     public function create(array $params): void
     {
-        $coachId  = $params['_auth']['sub'];
+        $coachId  = $params['_org_id'] ?? $params['_auth']['sub'];
         $clientId = $params['id'] ?? '';
 
         if (!preg_match('/^[a-f0-9]{24}$/i', $clientId)) {
@@ -135,7 +135,7 @@ class WorkoutAnalysisController
     // GET /coach/clients/:id/workout-analyses/recommendations
     public function recommendations(array $params): void
     {
-        $coachId  = $params['_auth']['sub'];
+        $coachId  = $params['_org_id'] ?? $params['_auth']['sub'];
         $clientId = $params['id'] ?? '';
 
         if (!preg_match('/^[a-f0-9]{24}$/i', $clientId)) {
@@ -216,7 +216,7 @@ class WorkoutAnalysisController
     {
         $analysis = $this->findAnalysis($params);
         $body     = Request::body();
-        $coachId  = $params['_auth']['sub'];
+        $coachId  = $params['_org_id'] ?? $params['_auth']['sub'];
 
         if ($analysis['status'] !== 'pending' && $analysis['status'] !== 'approved') {
             Response::error('Only pending or approved analyses can be assigned', 409);
@@ -309,7 +309,7 @@ class WorkoutAnalysisController
 
     private function findAnalysis(array $params): object
     {
-        $coachId    = new ObjectId($params['_auth']['sub']);
+        $coachId    = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId   = $params['id'] ?? '';
         $analysisId = $params['analysisId'] ?? '';
 

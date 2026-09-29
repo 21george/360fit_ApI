@@ -12,7 +12,7 @@ class SubscriptionController
 {
     private const TIER_LIMITS = [
         'free'     => 3,
-        'pro'      => 25,
+        'pro'      => 50,
         'business' => 999999,
     ];
 
@@ -39,9 +39,21 @@ class SubscriptionController
             'deleted_at'  => ['$exists' => false],
         ]);
 
-        $period          = $coach['subscription_period'] ?? 'monthly';
-        $periodEnd       = isset($coach['subscription_period_end']) ? (string) $coach['subscription_period_end'] : null;
-        $nextPaymentDate = $periodEnd; // same as period end for now
+        $period = $coach['subscription_period'] ?? 'monthly';
+        $formatDate = static function ($value): ?string {
+            if ($value instanceof \MongoDB\BSON\UTCDateTime) {
+                return $value->toDateTime()->format(DATE_ATOM);
+            }
+            return is_string($value) ? $value : null;
+        };
+
+        $trialStartsAt = $formatDate($coach['trial_starts_at'] ?? null);
+        $trialEndsAt = $formatDate($coach['trial_ends_at'] ?? null);
+        $periodEnd = $formatDate($coach['subscription_period_end'] ?? null);
+        $amountCents = $coach['subscription_price_cents'] ?? null;
+        $amount = is_numeric($amountCents) ? round(((int) $amountCents) / 100, 2) : null;
+        $currency = $coach['subscription_currency'] ?? null;
+        $providerAvailable = StripeService::isConfigured();
 
         Response::success([
             'tier'                   => $tier,
@@ -49,12 +61,100 @@ class SubscriptionController
             'period'                 => $period,
             'client_limit'           => $limit,
             'client_count'           => $clientCount,
-            'trial_ends_at'          => isset($coach['trial_ends_at']) ? (string) $coach['trial_ends_at'] : null,
+            'trial_starts_at'        => $trialStartsAt,
+            'trial_ends_at'          => $trialEndsAt,
             'current_period_end'     => $periodEnd,
-            'next_payment_date'      => $nextPaymentDate,
+            'next_payment_date'      => $periodEnd,
+            'amount'                 => $amount,
+            'currency'               => $currency,
+            'provider_available'     => $providerAvailable,
             'cancel_at_period_end'   => $coach['cancel_at_period_end'] ?? false,
-            'stripe_customer_id'     => $coach['stripe_customer_id'] ?? null,
         ]);
+    }
+
+    /**
+     * GET /subscription/billing-information
+     * Returns the authenticated coach's persisted billing contact and tax details.
+     */
+    public function billingInformation(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        $billing = $coach['billing_information'] ?? [];
+        Response::success([
+            'first_name'  => $billing['first_name'] ?? $coach['name'] ?? null,
+            'last_name'   => $billing['last_name'] ?? $coach['surname'] ?? null,
+            'company'     => $billing['company'] ?? null,
+            'address'     => $billing['address'] ?? $coach['address'] ?? null,
+            'postal_code' => $billing['postal_code'] ?? $coach['postal_code'] ?? null,
+            'city'        => $billing['city'] ?? $coach['city'] ?? null,
+            'country'     => $billing['country'] ?? $coach['country'] ?? null,
+            'vat_id'      => $billing['vat_id'] ?? null,
+            'email'       => $billing['email'] ?? $coach['email'] ?? null,
+            'phone'       => $billing['phone'] ?? $coach['phone'] ?? null,
+        ]);
+    }
+
+    /**
+     * PUT /subscription/billing-information
+     * Updates only non-sensitive billing contact and tax details for the authenticated coach.
+     */
+    public function updateBillingInformation(array $params): void
+    {
+        $coachId = new ObjectId($params['_auth']['sub']);
+        $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
+        if (!$coach) Response::error('Coach not found', 404);
+
+        $body = Request::body();
+        $allowed = [
+            'first_name', 'last_name', 'company', 'address', 'postal_code',
+            'city', 'country', 'vat_id', 'email', 'phone',
+        ];
+        $billing = array_filter(
+            $body,
+            fn(string $key): bool => in_array($key, $allowed, true),
+            ARRAY_FILTER_USE_KEY
+        );
+
+        if (array_key_exists('email', $billing) && $billing['email'] !== ''
+            && filter_var($billing['email'], FILTER_VALIDATE_EMAIL) === false) {
+            Response::error('Billing email must be valid', 422);
+        }
+        if (array_key_exists('country', $billing) && $billing['country'] !== ''
+            && !preg_match('/^[A-Za-z]{2}$/', (string) $billing['country'])) {
+            Response::error('Country must be a two-letter ISO code', 422);
+        }
+
+        $existing = $coach['billing_information'] ?? [];
+        $billing = array_map(
+            static fn($value) => is_string($value) ? trim($value) : $value,
+            array_merge($existing, $billing)
+        );
+
+        try {
+            if (!empty($coach['stripe_customer_id']) && StripeService::isConfigured()) {
+                $stripe = new StripeService();
+                $stripe->updateCustomerBillingDetails(
+                    $coach['stripe_customer_id'],
+                    $billing,
+                    (string) $coachId
+                );
+            }
+        } catch (\RuntimeException $e) {
+            Response::error('Failed to update billing information with payment provider', 502);
+        }
+
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'billing_information' => $billing,
+                'updated_at' => new \MongoDB\BSON\UTCDateTime(),
+            ]]
+        );
+
+        Response::success($billing, 'Billing information updated');
     }
 
     /**
@@ -78,19 +178,17 @@ class SubscriptionController
         $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
-        if (($coach['subscription_status'] ?? '') !== 'pending') {
-            Response::error('Subscription already configured', 409);
+        $subscriptionStatus = $coach['subscription_status'] ?? 'none';
+        if ($subscriptionStatus !== 'pending' && $subscriptionStatus !== 'none') {
+            Response::error(
+                'Subscription already configured (status: ' . $subscriptionStatus . ').',
+                409
+            );
         }
 
         try {
             $stripe = new StripeService();
         } catch (\RuntimeException) {
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                Response::success([
-                    'client_secret' => 'seti_mock_secret_dev',
-                    'customer_id'   => 'cus_mock_dev',
-                ], 'SetupIntent created (dev mode)');
-            }
             Response::error('Payment processing is not configured.', 503);
         }
 
@@ -171,20 +269,9 @@ class SubscriptionController
             Response::error('Failed to create trial subscription: ' . $e->getMessage(), 422);
         }
 
-        $trialEnd = isset($sub['trial_end']) ? new \MongoDB\BSON\UTCDateTime((int) $sub['trial_end'] * 1000) : null;
-
         Database::collection('coaches')->updateOne(
             ['_id' => $coachId],
-            ['$set' => [
-                'stripe_subscription_id'  => $sub['id'],
-                'subscription_tier'       => $tier,
-                'subscription_period'     => $period,
-                'subscription_status'     => 'trialing',
-                'trial_ends_at'           => $trialEnd,
-                'subscription_period_end' => $trialEnd,
-                'cancel_at_period_end'    => false,
-                'updated_at'              => new \MongoDB\BSON\UTCDateTime(),
-            ],
+            ['$set' => $this->subscriptionSnapshot($sub, $tier, $period),
             '$unset' => [
                 'pending_subscription_tier'   => '',
                 'pending_subscription_period' => '',
@@ -192,7 +279,7 @@ class SubscriptionController
         );
 
         // Send trial-start email
-        $trialEndDate = $trialEnd
+        $trialEndDate = !empty($sub['trial_end'])
             ? (new \DateTime())->setTimestamp((int) $sub['trial_end'])->format('F j, Y')
             : '';
         EmailService::sendTrialStarted(
@@ -233,14 +320,24 @@ class SubscriptionController
         Response::success([
             'access_token'  => $accessToken,
             'refresh_token' => $refreshToken,
+            'coach'         => [
+                'id'                  => (string) $coachId,
+                'name'                => $coach['name'],
+                'email'               => $coach['email'],
+                'language'            => $coach['language'] ?? 'en',
+                'subscription_status' => 'trialing',
+                'subscription_tier'   => $tier,
+            ],
             'tier'          => $tier,
-            'trial_ends_at' => $trialEnd ? (string) $trialEnd : null,
+            'trial_ends_at' => isset($sub['trial_end']) ? gmdate(DATE_ATOM, (int) $sub['trial_end']) : null,
             'redirect'      => '/dashboard',
         ], 'Trial started');
     }
 
     /**
      * POST /subscription/select-plan
+     */
+    public function selectPlan(array $params): void
     {
         $coachId = new ObjectId($params['_auth']['sub']);
         $body    = Request::body();
@@ -255,9 +352,12 @@ class SubscriptionController
         $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
-        // Verify still in pending state
-        if (($coach['subscription_status'] ?? '') !== 'pending') {
-            Response::error('Subscription already configured', 409);
+        $subscriptionStatus = $coach['subscription_status'] ?? 'none';
+        if ($subscriptionStatus !== 'pending' && $subscriptionStatus !== 'none') {
+            Response::error(
+                'Subscription already configured (status: ' . $subscriptionStatus . ').',
+                409
+            );
         }
 
         if ($tier === 'free') {
@@ -305,6 +405,14 @@ class SubscriptionController
             Response::success([
                 'access_token'  => $accessToken,
                 'refresh_token' => $refreshToken,
+                'coach'         => [
+                    'id'                  => (string) $coachId,
+                    'name'                => $coach['name'],
+                    'email'               => $coach['email'],
+                    'language'            => $coach['language'] ?? 'en',
+                    'subscription_status' => 'active',
+                    'subscription_tier'   => 'free',
+                ],
                 'tier'          => 'free',
                 'redirect'      => '/dashboard',
             ], 'Free plan activated');
@@ -314,12 +422,6 @@ class SubscriptionController
         try {
             $stripe = new StripeService();
         } catch (\RuntimeException $e) {
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                Response::success([
-                    'checkout_url' => '/subscription/mock-checkout?tier=' . $tier,
-                    'tier'         => $tier,
-                ], 'Ready for checkout (dev mode)');
-            }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
         $period  = $body['plan_period'] ?? $body['period'] ?? 'monthly';
@@ -381,9 +483,6 @@ class SubscriptionController
         try {
             $stripe = new StripeService();
         } catch (\RuntimeException $e) {
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                Response::success(['checkout_url' => '/subscription/mock-checkout?tier=' . $tier], 'Checkout session created (dev mode)');
-            }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
         $period  = $body['period'] ?? 'monthly';
@@ -445,9 +544,6 @@ class SubscriptionController
         try {
             $stripe  = new StripeService();
         } catch (\RuntimeException $e) {
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                Response::success(['portal_url' => '/subscription/mock-portal'], 'Portal session created (dev mode)');
-            }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
         $session = $stripe->createPortalSession($customerId);
@@ -473,13 +569,6 @@ class SubscriptionController
         try {
             $stripe = new StripeService();
         } catch (\RuntimeException $e) {
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                Database::collection('coaches')->updateOne(
-                    ['_id' => $coachId],
-                    ['$set' => ['cancel_at_period_end' => true, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
-                );
-                Response::success(null, 'Subscription will cancel at end of billing period (dev mode)');
-            }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
         $stripe->cancelSubscription($subId);
@@ -506,6 +595,24 @@ class SubscriptionController
             $event  = $stripe->verifyWebhookSignature($payload, $sigHeader);
         } catch (\RuntimeException $e) {
             Response::error('Webhook verification failed', 400);
+        }
+
+        $eventId = $event['id'] ?? null;
+        if (!$eventId) {
+            Response::error('Webhook event ID missing', 400);
+        }
+
+        $receipt = Database::collection('stripe_webhook_events')->updateOne(
+            ['event_id' => $eventId],
+            ['$setOnInsert' => [
+                'event_id' => $eventId,
+                'type' => $event['type'] ?? 'unknown',
+                'received_at' => new \MongoDB\BSON\UTCDateTime(),
+            ]],
+            ['upsert' => true]
+        );
+        if ($receipt->getUpsertedCount() === 0) {
+            Response::success(null, 'Webhook already processed');
         }
 
         $type = $event['type'] ?? '';
@@ -571,18 +678,12 @@ class SubscriptionController
             $status = 'trialing'; // Stripe sets incomplete for trials before first payment
         }
 
+        $snapshot = $this->subscriptionSnapshot($sub, $tier, $period);
+        $snapshot['stripe_customer_id'] = $customerId;
+        $snapshot['subscription_status'] = $status;
         Database::collection('coaches')->updateOne(
             ['_id' => new ObjectId($coachId)],
-            ['$set' => [
-                'stripe_customer_id'      => $customerId,
-                'stripe_subscription_id'  => $subscriptionId,
-                'subscription_tier'       => $tier,
-                'subscription_period'   => $period,
-                'subscription_status'     => $status,
-                'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
-                'cancel_at_period_end'    => false,
-                'updated_at'              => new \MongoDB\BSON\UTCDateTime(),
-            ],
+            ['$set' => $snapshot,
             '$unset' => [
                 'pending_subscription_tier'   => '',
                 'pending_subscription_period' => '',
@@ -599,18 +700,7 @@ class SubscriptionController
         $tier   = $this->tierFromPriceId($priceId);
         $period = $this->periodFromPriceId($priceId);
 
-        $update = [
-            'subscription_tier'       => $tier,
-            'subscription_period'     => $period,
-            'subscription_status'     => $sub['status'] ?? 'active',
-            'subscription_period_end' => new \MongoDB\BSON\UTCDateTime(($sub['current_period_end'] ?? time()) * 1000),
-            'cancel_at_period_end'    => $sub['cancel_at_period_end'] ?? false,
-            'updated_at'              => new \MongoDB\BSON\UTCDateTime(),
-        ];
-
-        if (!empty($sub['trial_end'])) {
-            $update['trial_ends_at'] = new \MongoDB\BSON\UTCDateTime((int) $sub['trial_end'] * 1000);
-        }
+        $update = $this->subscriptionSnapshot($sub, $tier, $period);
 
         Database::collection('coaches')->updateOne(
             ['_id' => new ObjectId($coachId)],
@@ -676,7 +766,11 @@ class SubscriptionController
                 'subscription_tier'      => 'free',
                 'subscription_period'    => 'monthly',
                 'subscription_status'    => 'cancelled',
+                'subscription_price_cents' => null,
+                'subscription_currency'  => null,
                 'cancel_at_period_end'   => false,
+                'last_stripe_sync_at'    => new \MongoDB\BSON\UTCDateTime(),
+                'last_stripe_sync_status' => 'success',
                 'updated_at'             => new \MongoDB\BSON\UTCDateTime(),
             ]]
         );
@@ -687,10 +781,15 @@ class SubscriptionController
         $customerId = $invoice['customer'] ?? null;
         if (!$customerId) return;
 
+        $coach = Database::collection('coaches')->findOne(['stripe_customer_id' => $customerId]);
+        if (!$coach) return;
+
         Database::collection('coaches')->updateOne(
             ['stripe_customer_id' => $customerId],
             ['$set' => [
                 'subscription_status' => 'past_due',
+                'failed_payment_attempts' => ($coach['failed_payment_attempts'] ?? 0) + 1,
+                'failed_payment_last_attempt_at' => new \MongoDB\BSON\UTCDateTime(),
                 'updated_at'          => new \MongoDB\BSON\UTCDateTime(),
             ]]
         );
@@ -709,6 +808,39 @@ class SubscriptionController
         if ($priceId === ($_ENV['STRIPE_PRICE_PRO'] ?? ''))      return 'monthly';
         if ($priceId === ($_ENV['STRIPE_PRICE_BUSINESS'] ?? '')) return 'monthly';
         return 'monthly';
+    }
+
+    /**
+     * Converts a verified Stripe subscription into the local read model.
+     * Webhooks are authoritative; this keeps billing reads available during
+     * transient Stripe API outages without storing sensitive card data.
+     */
+    private function subscriptionSnapshot(array $subscription, string $tier, string $period): array
+    {
+        $price = $subscription['items']['data'][0]['price'] ?? [];
+        $toDate = static fn($timestamp): ?\MongoDB\BSON\UTCDateTime =>
+            is_numeric($timestamp) ? new \MongoDB\BSON\UTCDateTime((int) $timestamp * 1000) : null;
+        $defaultPaymentMethod = $subscription['default_payment_method'] ?? null;
+
+        return [
+            'stripe_subscription_id' => $subscription['id'] ?? null,
+            'subscription_tier' => $tier,
+            'subscription_period' => $period,
+            'subscription_status' => $subscription['status'] ?? 'active',
+            'subscription_price_cents' => isset($price['unit_amount']) ? (int) $price['unit_amount'] : null,
+            'subscription_currency' => $price['currency'] ?? null,
+            'trial_starts_at' => $toDate($subscription['trial_start'] ?? null),
+            'trial_ends_at' => $toDate($subscription['trial_end'] ?? null),
+            'subscription_period_end' => $toDate($subscription['current_period_end'] ?? null),
+            'subscription_started_at' => $toDate($subscription['start_date'] ?? null),
+            'default_payment_method' => is_array($defaultPaymentMethod)
+                ? ($defaultPaymentMethod['id'] ?? null)
+                : $defaultPaymentMethod,
+            'cancel_at_period_end' => (bool) ($subscription['cancel_at_period_end'] ?? false),
+            'last_stripe_sync_at' => new \MongoDB\BSON\UTCDateTime(),
+            'last_stripe_sync_status' => 'success',
+            'updated_at' => new \MongoDB\BSON\UTCDateTime(),
+        ];
     }
 
     /**
@@ -769,7 +901,7 @@ class SubscriptionController
             Response::success($formatted);
         } catch (\RuntimeException $e) {
             error_log('Stripe invoices error: ' . $e->getMessage());
-            Response::success([]);
+            Response::error('Failed to retrieve invoices from payment provider', 502);
         }
     }
 
@@ -862,23 +994,6 @@ class SubscriptionController
                 'new_period' => $period,
             ], 'Subscription updated successfully');
         } catch (\RuntimeException $e) {
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                $limit = self::TIER_LIMITS[$newTier] ?? self::TIER_LIMITS['free'];
-                Database::collection('coaches')->updateOne(
-                    ['_id' => $coachId],
-                    ['$set' => [
-                        'subscription_tier'    => $newTier,
-                        'subscription_period'  => $body['period'] ?? 'monthly',
-                        'max_clients'          => $limit,
-                        'cancel_at_period_end' => false,
-                        'updated_at'           => new \MongoDB\BSON\UTCDateTime(),
-                    ]]
-                );
-                Response::success([
-                    'new_tier'   => $newTier,
-                    'new_period' => $body['period'] ?? 'monthly',
-                ], 'Subscription updated successfully (dev mode)');
-            }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
     }
@@ -920,7 +1035,7 @@ class SubscriptionController
             Response::success(['payment_methods' => $formatted]);
         } catch (\RuntimeException $e) {
             error_log('Stripe payment methods error: ' . $e->getMessage());
-            Response::success(['payment_methods' => []]);
+            Response::error('Failed to retrieve payment methods from payment provider', 502);
         }
     }
 
@@ -955,14 +1070,6 @@ class SubscriptionController
                 'setup_intent_id'=> $intent['id'],
             ]);
         } catch (\RuntimeException $e) {
-            // Development fallback: return mock intent so UI can still render
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                Response::success([
-                    'client_secret'   => 'mock_dev_secret_' . bin2hex(random_bytes(8)),
-                    'setup_intent_id' => 'mock_si_' . bin2hex(random_bytes(8)),
-                    'mock'            => true,
-                ]);
-            }
             Response::error('Payment processing is not configured. Please contact support.', 503);
         }
     }
@@ -1002,9 +1109,6 @@ class SubscriptionController
 
             Response::success(['payment_method_id' => $pmId], 'Payment method added', 201);
         } catch (\RuntimeException $e) {
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                Response::success(['payment_method_id' => 'mock_pm_' . bin2hex(random_bytes(8)), 'mock' => true], 'Payment method added (dev mode)', 201);
-            }
             Response::error('Failed to add payment method: ' . $e->getMessage(), 400);
         }
     }
@@ -1037,15 +1141,6 @@ class SubscriptionController
 
             Response::success(null, 'Payment method removed');
         } catch (\RuntimeException $e) {
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                if (($coach['default_payment_method'] ?? '') === $pmId) {
-                    Database::collection('coaches')->updateOne(
-                        ['_id' => $coachId],
-                        ['$unset' => ['default_payment_method' => ''], '$set' => ['updated_at' => new \MongoDB\BSON\UTCDateTime()]]
-                    );
-                }
-                Response::success(null, 'Payment method removed (dev mode)');
-            }
             Response::error('Failed to remove payment method', 400);
         }
     }
@@ -1078,13 +1173,6 @@ class SubscriptionController
 
             Response::success(null, 'Default payment method updated');
         } catch (\RuntimeException $e) {
-            if (($_ENV['APP_ENV'] ?? '') === 'development') {
-                Database::collection('coaches')->updateOne(
-                    ['_id' => $coachId],
-                    ['$set' => ['default_payment_method' => $pmId, 'updated_at' => new \MongoDB\BSON\UTCDateTime()]]
-                );
-                Response::success(null, 'Default payment method updated (dev mode)');
-            }
             Response::error('Failed to update default payment method', 400);
         }
     }

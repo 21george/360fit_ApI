@@ -6,6 +6,7 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Helpers\Response;
+use App\Services\WearableTrendCacheService;
 use MongoDB\BSON\ObjectId;
 use MongoDB\BSON\UTCDateTime;
 
@@ -16,11 +17,12 @@ class AnalyticsController
         $user     = $params['_auth'];
         $clientId = $params['clientId'] ?? '';
 
-        if ($user['role'] !== 'coach') Response::error('Forbidden', 403);
+        if ($user['role'] !== 'coach' && $user['role'] !== 'staff') Response::error('Forbidden', 403);
 
+        $orgId = $params['_org_id'] ?? $user['sub'];
         $client = Database::collection('clients')->findOne([
             '_id' => new ObjectId($clientId),
-            'coach_id' => new ObjectId($user['sub'])
+            'coach_id' => new ObjectId($orgId)
         ]);
         if (!$client) Response::notFound('Client not found');
 
@@ -166,6 +168,9 @@ class AnalyticsController
             $topPRs[] = ['exercise' => $name, 'max_kg' => $pr['max_kg'], 'date' => $pr['date']];
         }
 
+        // ── 8. Wearable trends + readiness ─────────────────────────────────
+        $wearableAnalytics = $this->buildWearableAnalytics($clientObjId);
+
         Response::success([
             'completion_rate'   => $completionData,
             'exercise_progress' => $exerciseProgress,
@@ -178,7 +183,113 @@ class AnalyticsController
             'total_reps'        => $totalReps,
             'personal_records'  => $topPRs,
             'weekly_volume'     => array_values($weeklyVolume),
+            'wearable'          => $wearableAnalytics,
         ]);
+    }
+
+    /**
+     * Build wearable trend arrays and readiness/recovery insights for a client.
+     *
+     * @return array<string, mixed>
+     */
+    private function buildWearableAnalytics(ObjectId $clientId): array
+    {
+        $metrics = ['steps', 'active_calories', 'distance_km', 'resting_hr', 'sleep_minutes'];
+        $windows = [7, 30, 90];
+        $trends = [];
+
+        $cache = new WearableTrendCacheService();
+        foreach ($windows as $days) {
+            $trends["{$days}d"] = [];
+            foreach ($metrics as $metric) {
+                try {
+                    $trends["{$days}d"][$metric] = $cache->getTrend($clientId, $metric, $days);
+                } catch (\Throwable $e) {
+                    $trends["{$days}d"][$metric] = [
+                        'metric' => $metric, 'window_days' => $days, 'points' => [],
+                        'average' => 0, 'total' => 0, 'min' => 0, 'max' => 0,
+                    ];
+                }
+            }
+        }
+
+        // Latest readiness snapshot
+        $latest = Database::collection('wearable_data')->findOne(
+            ['client_id' => $clientId],
+            ['sort' => ['date' => -1]]
+        );
+
+        $readiness = null;
+        if ($latest) {
+            $d = (array) $latest;
+            $readiness = [
+                'date'           => $d['date'] ?? null,
+                'steps'          => (int)   ($d['steps']          ?? 0),
+                'active_calories'=> (float) ($d['active_calories'] ?? 0),
+                'sleep_minutes'  => (int)   ($d['sleep_minutes']  ?? 0),
+                'sleep_score'    => (int)   ($d['sleep_score']    ?? 0),
+                'resting_hr'     => (int)   ($d['resting_hr']     ?? 0),
+                'recovery_score' => (int)   ($d['recovery_score'] ?? 0),
+            ];
+        }
+
+        // Workout/sleep correlation over the last 30 days
+        $correlation = $this->computeWorkoutSleepCorrelation($clientId);
+
+        return [
+            'trends'      => $trends,
+            'readiness' => $readiness,
+            'correlation' => $correlation,
+        ];
+    }
+
+    /**
+     * Compute simple correlation: average workout completion rate on days
+     * grouped by sleep quality buckets (poor / moderate / good).
+     *
+     * @return array<string, mixed>
+     */
+    private function computeWorkoutSleepCorrelation(ObjectId $clientId): array
+    {
+        $since = date('Y-m-d', strtotime('-30 days'));
+
+        $wearable = Database::collection('wearable_data')->find(
+            ['client_id' => $clientId, 'date' => ['$gte' => $since]],
+            ['sort' => ['date' => 1]]
+        )->toArray();
+
+        $logs = Database::collection('workout_logs')->find(
+            ['client_id' => $clientId, 'completed_at' => ['$gte' => new UTCDateTime(strtotime($since) * 1000)]],
+            ['projection' => ['completed_at' => 1]]
+        )->toArray();
+
+        $workoutDates = [];
+        foreach ($logs as $log) {
+            if (isset($log['completed_at'])) {
+                $workoutDates[$log['completed_at']->toDateTime()->format('Y-m-d')] = true;
+            }
+        }
+
+        $buckets = ['poor' => ['count' => 0, 'workouts' => 0], 'moderate' => ['count' => 0, 'workouts' => 0], 'good' => ['count' => 0, 'workouts' => 0]];
+        foreach ($wearable as $day) {
+            $minutes = (int) ($day['sleep_minutes'] ?? 0);
+            $bucket = $minutes < 360 ? 'poor' : ($minutes < 480 ? 'moderate' : 'good');
+            $buckets[$bucket]['count']++;
+            if (!empty($workoutDates[$day['date'] ?? ''])) {
+                $buckets[$bucket]['workouts']++;
+            }
+        }
+
+        $result = [];
+        foreach ($buckets as $bucket => $data) {
+            $result[$bucket] = [
+                'days'              => $data['count'],
+                'workout_days'      => $data['workouts'],
+                'completion_rate'   => $data['count'] > 0 ? round(($data['workouts'] / $data['count']) * 100, 1) : 0,
+            ];
+        }
+
+        return $result;
     }
 
     // GET /client/analytics (client-side)
@@ -305,13 +416,14 @@ class AnalyticsController
             'total_sets'        => $totalSets,
             'personal_records'  => $topPRs,
             'weekly_volume'     => array_values($weeklyVolume),
+            'wearable'          => $this->buildWearableAnalytics($clientObjId),
         ]);
     }
 
     // GET /analytics/coach  (coach-level aggregate stats)
     public function coachAnalytics(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
 
         // ── 1. Client counts ───────────────────────────────────────────────
         $totalClients = Database::collection('clients')->countDocuments([
@@ -417,7 +529,7 @@ class AnalyticsController
     // GET /analytics/sessions  (coaching session aggregate stats)
     public function sessionAnalytics(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
 
         $allSessions = Database::collection('coaching_sessions')
             ->find(['coach_id' => $coachId], ['sort' => ['scheduled_at' => -1]])

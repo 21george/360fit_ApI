@@ -4,18 +4,20 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
-use App\Config\Database;
 use App\Helpers\{Request, Response, ScopedCollection};
 use App\Services\FoodService;
+use App\Services\NutritionCacheService;
 use MongoDB\BSON\ObjectId;
 
 class FoodController
 {
     private FoodService $foodService;
+    private NutritionCacheService $nutritionCache;
 
     public function __construct()
     {
-        $this->foodService = new FoodService();
+        $this->foodService    = new FoodService();
+        $this->nutritionCache = new NutritionCacheService($this->foodService);
     }
 
     /**
@@ -32,16 +34,16 @@ class FoodController
             Response::error('Search query is required', 422, ['q' => ['Query parameter "q" is required']]);
         }
 
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
 
         // 1. Search local foods (custom + cached USDA)
         $localFoods = $this->foodService->searchLocalFoods($query, $coachId);
 
-        // 2. Search USDA API
+        // 2. Search USDA API (routed through the nutrition cache layer)
         $usdaFoods = [];
         $totalHits = count($localFoods);
         try {
-            $usdaResult = $this->foodService->searchFoods($query, $page);
+            $usdaResult = $this->nutritionCache->searchFoods($query, $page);
             $usdaFoods  = $usdaResult['foods'] ?? [];
             $totalHits  = $usdaResult['totalHits'] ?? count($usdaFoods);
         } catch (\Throwable $e) {
@@ -81,7 +83,7 @@ class FoodController
      */
     public function index(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
 
         $foods = ScopedCollection::for('foods')->find(
             ['coach_id' => $coachId, 'source' => 'custom'],
@@ -99,7 +101,7 @@ class FoodController
     public function show(array $params): void
     {
         $foodId  = new ObjectId($params['id']);
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $food    = ScopedCollection::for('foods')->findOne(['_id' => $foodId]);
 
         if (!$food) {
@@ -124,7 +126,7 @@ class FoodController
      */
     public function store(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, [
             'name' => 'required',
@@ -165,7 +167,7 @@ class FoodController
         }
 
         try {
-            $food = $this->foodService->getFoodDetails($fdcId);
+            $food = $this->nutritionCache->getFoodDetails($fdcId);
             Response::success($food);
         } catch (\Throwable $e) {
             Response::error('Food not found', 404);
@@ -199,7 +201,7 @@ class FoodController
             if ($food) {
                 $data = (array) $food;
                 if (($data['source'] ?? '') === 'custom' && isset($data['coach_id'])) {
-                    $coachId = new ObjectId($params['_auth']['sub']);
+                    $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
                     if ((string) $data['coach_id'] !== (string) $coachId) {
                         Response::error('Food not found', 404);
                     }
@@ -210,7 +212,7 @@ class FoodController
 
             if (!$food) {
                 try {
-                    $details   = $this->foodService->getFoodDetails($fdcId);
+                    $details   = $this->nutritionCache->getFoodDetails($fdcId);
                     $nutrients = $details['nutrients_per_100g'] ?? [];
 
                     $quantityG = $this->parseQuantityToGrams($quantity);

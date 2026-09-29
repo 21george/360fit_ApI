@@ -18,7 +18,7 @@ class MessageController
     // GET /messages/:clientId (coach)
     public function coachThread(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = new ObjectId($params['clientId']);
         $this->verifyClientOwnership($coachId, $clientId);
         $this->getThread($clientId, $coachId);
@@ -54,8 +54,8 @@ class MessageController
             $body['media_url'] = $url;
         }
 
-        if ($auth['role'] === 'coach') {
-            $coachId  = new ObjectId($auth['sub']);
+        if ($auth['role'] === 'coach' || $auth['role'] === 'staff') {
+            $coachId  = new ObjectId($params['_org_id'] ?? $auth['sub']);
             $clientId = new ObjectId($body['client_id'] ?? '');
             $this->verifyClientOwnership($coachId, $clientId);
             $senderId   = $coachId;
@@ -134,6 +134,15 @@ class MessageController
 
         $this->setTypingState($clientId, $coachId, $senderRole, false);
 
+        if ($senderRole === 'coach' && $client) {
+            \App\Services\ActivityLogService::log(
+                'message_sent',
+                (string) $clientId,
+                $client['name'] ?? null,
+                ['message_id' => $messageId, 'has_media' => $hasMedia]
+            );
+        }
+
         $response = [
             'id'          => (string) $result->getInsertedId(),
             'content'     => $doc['content'],
@@ -152,7 +161,7 @@ class MessageController
     // GET /messages/:clientId/typing (coach)
     public function coachTypingStatus(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = new ObjectId($params['clientId']);
         $this->verifyClientOwnership($coachId, $clientId);
 
@@ -164,7 +173,7 @@ class MessageController
     // POST /messages/:clientId/typing (coach)
     public function updateCoachTyping(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $clientId = new ObjectId($params['clientId']);
         $this->verifyClientOwnership($coachId, $clientId);
 
@@ -253,7 +262,7 @@ class MessageController
     // GET /messages/unread  — returns unread messages from clients (coach view)
     public function unreadMessages(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $col     = Database::collection('messages');
 
         $page    = max(1, (int) Request::get('page', 1));
@@ -305,7 +314,7 @@ class MessageController
     // GET /messages/unread-count  — lightweight badge count (coach view)
     public function unreadCount(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $col     = Database::collection('messages');
 
         // Group by client_id for per-client unread counts
@@ -342,7 +351,7 @@ class MessageController
     // POST /messages/read-all  — mark all client messages as read (coach view)
     public function markAllRead(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $result  = Database::collection('messages')->updateMany(
             ['coach_id' => $coachId, 'sender_role' => 'client', 'read' => false],
             ['$set' => ['read' => true]]

@@ -14,8 +14,8 @@ class WorkoutPlanController
     // GET /workout-plans
     public function index(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
-        $filter   = ['coach_id' => $coachId];
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
+        $filter   = [];
         $clientId = Request::get('client_id');
 
         // NoSQL injection fix: validate GET params are scalar strings
@@ -53,12 +53,11 @@ class WorkoutPlanController
 
         $page    = max(1, (int) Request::get('page', 1));
         $perPage = 20;
-        $col     = Database::collection('workout_plans');
+        $col     = ScopedCollection::for('workout_plans');
 
         if ($isClient) {
             // Show plans where client is assigned (individual or group)
             $clientObjId = new ObjectId($clientId);
-            $filter = ['coach_id' => $coachId];
             $filter['$or'] = [
                 ['client_id' => $clientObjId],
                 ['client_ids' => ['$in' => [$clientObjId]]]
@@ -92,7 +91,7 @@ class WorkoutPlanController
     // POST /workout-plans
     public function store(array $params): void
     {
-        $coachId  = new ObjectId($params['_auth']['sub']);
+        $coachId  = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body     = Request::body();
         $planType = $body['plan_type'] ?? 'individual';
 
@@ -180,6 +179,18 @@ class WorkoutPlanController
             }
         }
 
+        $primaryClientId = $planType === 'individual' ? ($body['client_id'] ?? null) : null;
+        $primaryClientName = null;
+        if ($primaryClientId && isset($client)) {
+            $primaryClientName = $client['name'] ?? null;
+        }
+        \App\Services\ActivityLogService::log(
+            'workout_plan_created',
+            $primaryClientId,
+            $primaryClientName,
+            ['plan_id' => $planId, 'title' => $planTitle, 'plan_type' => $planType]
+        );
+
         Response::success(['id' => $planId], 'Workout plan created', 201);
     }
 
@@ -253,7 +264,7 @@ class WorkoutPlanController
     public function assign(array $params): void
     {
         try {
-            $coachId = new ObjectId($params['_auth']['sub']);
+            $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
             $planId  = new ObjectId($params['id']);
         } catch (\MongoDB\Driver\Exception\InvalidArgumentException $e) {
             Response::error('Invalid plan ID', 400);
@@ -330,7 +341,7 @@ class WorkoutPlanController
             $update['group_name'] = null;
         }
 
-        Database::collection('workout_plans')->updateOne(
+        ScopedCollection::for('workout_plans')->updateOne(
             ['_id' => $planId],
             ['$set' => $update]
         );
@@ -344,6 +355,15 @@ class WorkoutPlanController
             } catch (\Throwable $e) {
                 error_log('Failed to send assignment notification to client ' . (string) $client['_id'] . ': ' . $e->getMessage());
             }
+        }
+
+        foreach ($clientObjects as $client) {
+            \App\Services\ActivityLogService::log(
+                'workout_plan_assigned',
+                (string) $client['_id'],
+                $client['name'] ?? null,
+                ['plan_id' => (string) $planId, 'title' => $plan['title'] ?? null]
+            );
         }
 
         Response::success([
@@ -393,7 +413,7 @@ class WorkoutPlanController
     // POST /workout-plans/import
     public function import(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
 
         if (!isset($_FILES['file'])) {
             Response::error('No file uploaded', 400);
@@ -445,7 +465,7 @@ class WorkoutPlanController
     // POST /workout-plans/import-drive — Import from Google Drive URL
     public function importDrive(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
 
         $url = $body['url'] ?? '';
@@ -496,6 +516,7 @@ class WorkoutPlanController
 
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $contentType = curl_getinfo($ch, CURLINFO_CONTENT_TYPE) ?? '';
         $error    = curl_error($ch);
         curl_close($ch);
 
@@ -505,7 +526,6 @@ class WorkoutPlanController
         }
 
         // Detect content type and determine extension
-        $contentType = curl_getinfo($ch, CURLINFO_CONTENT_TYPE) ?? '';
         $ext = match (true) {
             str_contains($contentType, 'spreadsheetml') => 'xlsx',
             str_contains($contentType, 'ms-excel')      => 'xls',
@@ -573,6 +593,15 @@ class WorkoutPlanController
         return $plan;
     }
 
+    private function sanitizeTitle(mixed $title): string
+    {
+        $str = is_string($title) ? trim($title) : '';
+        if ($str === '' || preg_match('/^[a-f0-9]{24}$/i', $str)) {
+            return 'Untitled Plan';
+        }
+        return $str;
+    }
+
     private function format(object $doc, bool $full = false): array
     {
         $clientIds = [];
@@ -605,7 +634,7 @@ class WorkoutPlanController
             'client_ids'      => $clientIds,
             'assigned_client' => $assignedClient,
             'group_name'      => $doc['group_name'] ?? null,
-            'title'           => $doc['title'],
+            'title'           => $this->sanitizeTitle($doc['title']),
             'week_start'      => $doc['week_start'] ? date('Y-m-d', (int)(((string)$doc['week_start']) / 1000)) : null,
             'status'          => $doc['status'],
             'notes'           => $doc['notes'] ?? null,

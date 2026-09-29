@@ -101,6 +101,20 @@ class FoodService
             return $this->normalizeCachedFood($cached);
         }
 
+        return $this->fetchAndCacheFoodDetails($fdcId);
+    }
+
+    /**
+     * Fetch food details directly from the USDA API, bypassing the local
+     * cache check entirely, and upsert the result into the `foods`
+     * collection. Used by getFoodDetails() on a true cache miss, and by
+     * NutritionCacheService to force a live refresh of an existing
+     * (stale) cached food.
+     *
+     * @return array{name: string, fdc_id: int, nutrients_per_100g: array}
+     */
+    public function fetchAndCacheFoodDetails(int $fdcId): array
+    {
         $url = self::BASE_URL . "/food/{$fdcId}";
         if ($this->apiKey) {
             $url .= '?' . http_build_query(['api_key' => $this->apiKey]);

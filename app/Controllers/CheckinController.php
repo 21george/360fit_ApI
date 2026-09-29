@@ -30,7 +30,7 @@ class CheckinController
     // POST /checkins
     public function store(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, [
             'client_id'    => 'required',
@@ -73,19 +73,38 @@ class CheckinController
             'updated_at'   => new \MongoDB\BSON\UTCDateTime(),
         ]);
 
-        // Notify client
+        // In-app + push notification to client
+        $triggerService = new NotificationTriggerService();
+        try {
+            $triggerService->notifyClientCheckinScheduled(
+                (string) $clientId,
+                (string) $result->getInsertedId(),
+                $body['scheduled_at'],
+                $body['type']
+            );
+        } catch (\Throwable $e) {
+            error_log('Failed to send check-in notification to client: ' . $e->getMessage());
+        }
+
+        // Legacy FCM direct push (kept for compatibility with older clients)
         if (!empty($client['fcm_token'])) {
             $datetime = date('D M j, g:i A', strtotime($body['scheduled_at']));
             FcmService::notifyCheckin($client['fcm_token'], $datetime);
         }
 
         // Schedule 2-hour reminder for coach
-        $triggerService = new NotificationTriggerService();
         $triggerService->scheduleCheckinReminder(
             (string) $result->getInsertedId(),
             (string) $clientId,
             $client['name'] ?? 'A client',
             $body['scheduled_at']
+        );
+
+        \App\Services\ActivityLogService::log(
+            'checkin_scheduled',
+            (string) $clientId,
+            $client['name'] ?? null,
+            ['checkin_id' => (string) $result->getInsertedId(), 'type' => $body['type']]
         );
 
         Response::success(['id' => (string) $result->getInsertedId()], 'Check-in scheduled', 201);
