@@ -26,6 +26,9 @@ use App\Controllers\{
     StaffController,
     AssessmentController,
     StudioController,
+    StudioClassController,
+    StudioBookingController,
+    StudioMembershipController,
     RehabController
 };
 use App\Middleware\{CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SubscriptionMiddleware, SetupAuthMiddleware, StaffMiddleware};
@@ -49,6 +52,9 @@ $router->post('/auth/coach/login',    [AuthController::class, 'coachLogin'],    
 $router->post('/auth/client/login',   [AuthController::class, 'clientLogin'],   [AuthRateLimitMiddleware::class]);
 $router->post('/auth/refresh',        [AuthController::class, 'refresh'],       [AuthRateLimitMiddleware::class]);
 $router->post('/auth/staff/login',    [AuthController::class, 'staffLogin'],    [AuthRateLimitMiddleware::class]);
+$router->post('/auth/complete-onboarding', [AuthController::class, 'completeOnboarding'], [AuthRateLimitMiddleware::class]);
+$router->post('/auth/forgot-password',  [AuthController::class, 'forgotPassword'],  [AuthRateLimitMiddleware::class]);
+$router->post('/auth/reset-password',   [AuthController::class, 'resetPassword'],    [AuthRateLimitMiddleware::class]);
 $router->post('/auth/logout',         [AuthController::class, 'logout']);
 
 // ─── Coach: Profile ──────────────────────────────────────────────────────────
@@ -65,83 +71,83 @@ $router->get('/coaches/registered', [CoachController::class, 'index'], [CoachMid
 
 
 // ─── Coach: Analytics ────────────────────────────────────────────────────────
-$router->get('/analytics/coach',    [AnalyticsController::class, 'coachAnalytics'],   [CoachMiddleware::class]);
-$router->get('/analytics/sessions', [AnalyticsController::class, 'sessionAnalytics'], [CoachMiddleware::class]);
+$router->get('/analytics/coach',    [AnalyticsController::class, 'coachAnalytics'],   [StaffMiddleware::class]);
+$router->get('/analytics/sessions', [AnalyticsController::class, 'sessionAnalytics'], [StaffMiddleware::class]);
 
 
 // ─── Coach: Clients ───────────────────────────────────────────────────────────
-$router->get('/coach/clients',                  [ClientController::class, 'index'],          [CoachMiddleware::class]);
-$router->post('/coach/clients',                 [ClientController::class, 'store'],          [CoachMiddleware::class, SubscriptionMiddleware::class]);
-$router->post('/coach/clients/import',          [ClientController::class, 'import'],         [CoachMiddleware::class]);
-$router->get('/coach/clients/:id',              [ClientController::class, 'show'],           [CoachMiddleware::class]);
-$router->put('/coach/clients/:id',              [ClientController::class, 'update'],         [CoachMiddleware::class]);
-$router->delete('/coach/clients/:id',           [ClientController::class, 'destroy'],        [CoachMiddleware::class]);
-$router->delete('/coach/clients/:id/permanent',  [ClientController::class, 'permanentDelete'], [CoachMiddleware::class]);
-$router->post('/coach/clients/:id/photo',         [ClientController::class, 'uploadClientPhoto'], [CoachMiddleware::class]);
-$router->post('/coach/clients/:id/regenerate-code', [ClientController::class, 'regenerateCode'], [CoachMiddleware::class]);
-$router->post('/coach/clients/:id/block',   [ClientController::class, 'block'],   [CoachMiddleware::class]);
-$router->post('/coach/clients/:id/unblock', [ClientController::class, 'unblock'], [CoachMiddleware::class]);
-$router->get('/coach/clients/:id/analytics',   [ClientController::class, 'analytics'],      [CoachMiddleware::class]);
-$router->get('/coach/clients/:id/logs',        [WorkoutLogController::class, 'clientLogs'], [CoachMiddleware::class]);
-$router->get('/coach/clients/:id/live-progress',    [WorkoutLogController::class, 'liveProgress'],         [CoachMiddleware::class]);
-$router->get('/coach/clients/:id/workout-progress', [WorkoutLogController::class, 'clientWorkoutProgress'], [CoachMiddleware::class]);
-$router->post('/coach/clients/:id/measurements',[MediaController::class, 'storeMeasurement'],[CoachMiddleware::class]);
-$router->get('/coach/media/:clientId',         [MediaController::class, 'clientMedia'],     [CoachMiddleware::class]);
+$router->get('/coach/clients',                  [ClientController::class, 'index'],          [StaffMiddleware::class]);
+$router->post('/coach/clients',                 [ClientController::class, 'store'],          [StaffMiddleware::class, SubscriptionMiddleware::class]);
+$router->post('/coach/clients/import',          [ClientController::class, 'import'],         [StaffMiddleware::class, SubscriptionMiddleware::class]);
+$router->get('/coach/clients/:id',              [ClientController::class, 'show'],           [StaffMiddleware::class]);
+$router->put('/coach/clients/:id',              [ClientController::class, 'update'],         [StaffMiddleware::class]);
+$router->delete('/coach/clients/:id',           [ClientController::class, 'destroy'],        [StaffMiddleware::class]);
+$router->delete('/coach/clients/:id/permanent',  [ClientController::class, 'permanentDelete'], [StaffMiddleware::class]);
+$router->post('/coach/clients/:id/photo',         [ClientController::class, 'uploadClientPhoto'], [StaffMiddleware::class]);
+$router->post('/coach/clients/:id/regenerate-code', [ClientController::class, 'regenerateCode'], [StaffMiddleware::class]);
+$router->post('/coach/clients/:id/block',   [ClientController::class, 'block'],   [StaffMiddleware::class]);
+$router->post('/coach/clients/:id/unblock', [ClientController::class, 'unblock'], [StaffMiddleware::class]);
+$router->get('/coach/clients/:id/analytics',   [ClientController::class, 'analytics'],      [StaffMiddleware::class]);
+$router->get('/coach/clients/:id/logs',        [WorkoutLogController::class, 'clientLogs'], [StaffMiddleware::class]);
+$router->get('/coach/clients/:id/live-progress',    [WorkoutLogController::class, 'liveProgress'],         [StaffMiddleware::class]);
+$router->get('/coach/clients/:id/workout-progress', [WorkoutLogController::class, 'clientWorkoutProgress'], [StaffMiddleware::class]);
+$router->post('/coach/clients/:id/measurements',[MediaController::class, 'storeMeasurement'],[StaffMiddleware::class]);
+$router->get('/coach/media/:clientId',         [MediaController::class, 'clientMedia'],     [StaffMiddleware::class]);
 
 // ─── Coach: Workout Plans ─────────────────────────────────────────────────────
-$router->get('/workout-plans',         [WorkoutPlanController::class, 'index'],   [CoachMiddleware::class]);
-$router->get('/workout-plans/saved',   [WorkoutPlanController::class, 'savedPlans'], [CoachMiddleware::class]);
-$router->post('/workout-plans',        [WorkoutPlanController::class, 'store'],   [CoachMiddleware::class]);
-$router->post('/workout-plans/import', [WorkoutPlanController::class, 'import'],  [CoachMiddleware::class]);
-$router->post('/workout-plans/import-drive', [WorkoutPlanController::class, 'importDrive'], [CoachMiddleware::class]);
-$router->get('/workout-plans/:id',     [WorkoutPlanController::class, 'show'],    [CoachMiddleware::class]);
-$router->put('/workout-plans/:id',     [WorkoutPlanController::class, 'update'],  [CoachMiddleware::class]);
-$router->delete('/workout-plans/:id',  [WorkoutPlanController::class, 'destroy'], [CoachMiddleware::class]);
-$router->post('/workout-plans/:id/assign', [WorkoutPlanController::class, 'assign'], [CoachMiddleware::class]);
+$router->get('/workout-plans',         [WorkoutPlanController::class, 'index'],   [StaffMiddleware::class]);
+$router->get('/workout-plans/saved',   [WorkoutPlanController::class, 'savedPlans'], [StaffMiddleware::class]);
+$router->post('/workout-plans',        [WorkoutPlanController::class, 'store'],   [StaffMiddleware::class]);
+$router->post('/workout-plans/import', [WorkoutPlanController::class, 'import'],  [StaffMiddleware::class]);
+$router->post('/workout-plans/import-drive', [WorkoutPlanController::class, 'importDrive'], [StaffMiddleware::class]);
+$router->get('/workout-plans/:id',     [WorkoutPlanController::class, 'show'],    [StaffMiddleware::class]);
+$router->put('/workout-plans/:id',     [WorkoutPlanController::class, 'update'],  [StaffMiddleware::class]);
+$router->delete('/workout-plans/:id',  [WorkoutPlanController::class, 'destroy'], [StaffMiddleware::class]);
+$router->post('/workout-plans/:id/assign', [WorkoutPlanController::class, 'assign'], [StaffMiddleware::class]);
 
 // ─── Coach: Workout Analyses ──────────────────────────────────────────────────
-$router->get('/coach/clients/:id/workout-analyses', [WorkoutAnalysisController::class, 'index'], [CoachMiddleware::class]);
-$router->post('/coach/clients/:id/workout-analyses', [WorkoutAnalysisController::class, 'create'], [CoachMiddleware::class]);
-$router->get('/coach/clients/:id/workout-analyses/recommendations', [WorkoutAnalysisController::class, 'recommendations'], [CoachMiddleware::class]);
-$router->get('/coach/clients/:id/workout-analyses/:analysisId', [WorkoutAnalysisController::class, 'show'], [CoachMiddleware::class]);
-$router->post('/coach/clients/:id/workout-analyses/:analysisId/approve', [WorkoutAnalysisController::class, 'approve'], [CoachMiddleware::class]);
-$router->post('/coach/clients/:id/workout-analyses/:analysisId/reject', [WorkoutAnalysisController::class, 'reject'], [CoachMiddleware::class]);
-$router->post('/coach/clients/:id/workout-analyses/:analysisId/assign', [WorkoutAnalysisController::class, 'assign'], [CoachMiddleware::class]);
+$router->get('/coach/clients/:id/workout-analyses', [WorkoutAnalysisController::class, 'index'], [StaffMiddleware::class]);
+$router->post('/coach/clients/:id/workout-analyses', [WorkoutAnalysisController::class, 'create'], [StaffMiddleware::class]);
+$router->get('/coach/clients/:id/workout-analyses/recommendations', [WorkoutAnalysisController::class, 'recommendations'], [StaffMiddleware::class]);
+$router->get('/coach/clients/:id/workout-analyses/:analysisId', [WorkoutAnalysisController::class, 'show'], [StaffMiddleware::class]);
+$router->post('/coach/clients/:id/workout-analyses/:analysisId/approve', [WorkoutAnalysisController::class, 'approve'], [StaffMiddleware::class]);
+$router->post('/coach/clients/:id/workout-analyses/:analysisId/reject', [WorkoutAnalysisController::class, 'reject'], [StaffMiddleware::class]);
+$router->post('/coach/clients/:id/workout-analyses/:analysisId/assign', [WorkoutAnalysisController::class, 'assign'], [StaffMiddleware::class]);
 
 // ─── Coach: Foods ────────────────────────────────────────────────────────────
-$router->get('/foods/search',        [FoodController::class, 'search'],    [CoachMiddleware::class]);
-$router->get('/foods/calculate',     [FoodController::class, 'calculate'], [CoachMiddleware::class]);
-$router->get('/foods/fdc/:fdcId',    [FoodController::class, 'details'],   [CoachMiddleware::class]);
-$router->get('/foods',               [FoodController::class, 'index'],     [CoachMiddleware::class]);
-$router->get('/foods/:id',           [FoodController::class, 'show'],      [CoachMiddleware::class]);
-$router->post('/foods',              [FoodController::class, 'store'],     [CoachMiddleware::class]);
+$router->get('/foods/search',        [FoodController::class, 'search'],    [StaffMiddleware::class]);
+$router->get('/foods/calculate',     [FoodController::class, 'calculate'], [StaffMiddleware::class]);
+$router->get('/foods/fdc/:fdcId',    [FoodController::class, 'details'],   [StaffMiddleware::class]);
+$router->get('/foods',               [FoodController::class, 'index'],     [StaffMiddleware::class]);
+$router->get('/foods/:id',           [FoodController::class, 'show'],      [StaffMiddleware::class]);
+$router->post('/foods',              [FoodController::class, 'store'],     [StaffMiddleware::class]);
 
 // ─── Coach: Nutrition Plans ───────────────────────────────────────────────────
-$router->get('/nutrition-plans',        [NutritionController::class, 'index'],  [CoachMiddleware::class]);
-$router->post('/nutrition-plans',       [NutritionController::class, 'store'],  [CoachMiddleware::class]);
-$router->get('/nutrition-plans/:id',    [NutritionController::class, 'show'],    [CoachMiddleware::class]);
-$router->put('/nutrition-plans/:id',    [NutritionController::class, 'update'],  [CoachMiddleware::class]);
-$router->delete('/nutrition-plans/:id', [NutritionController::class, 'destroy'], [CoachMiddleware::class]);
-$router->post('/nutrition-plans/:id/assign', [NutritionController::class, 'assign'], [CoachMiddleware::class]);
+$router->get('/nutrition-plans',        [NutritionController::class, 'index'],  [StaffMiddleware::class]);
+$router->post('/nutrition-plans',       [NutritionController::class, 'store'],  [StaffMiddleware::class]);
+$router->get('/nutrition-plans/:id',    [NutritionController::class, 'show'],    [StaffMiddleware::class]);
+$router->put('/nutrition-plans/:id',    [NutritionController::class, 'update'],  [StaffMiddleware::class]);
+$router->delete('/nutrition-plans/:id', [NutritionController::class, 'destroy'], [StaffMiddleware::class]);
+$router->post('/nutrition-plans/:id/assign', [NutritionController::class, 'assign'], [StaffMiddleware::class]);
 
 // ─── Coach: Check-ins ─────────────────────────────────────────────────────────
-$router->get('/checkins',      [CheckinController::class, 'index'],   [CoachMiddleware::class]);
-$router->post('/checkins',     [CheckinController::class, 'store'],   [CoachMiddleware::class]);
-$router->put('/checkins/:id',  [CheckinController::class, 'update'],  [CoachMiddleware::class]);
-$router->delete('/checkins/:id',[CheckinController::class, 'destroy'],[CoachMiddleware::class]);
-$router->post('/checkins/:id/status',[CheckinController::class, 'updateStatus'],[CoachMiddleware::class]);
+$router->get('/checkins',      [CheckinController::class, 'index'],   [StaffMiddleware::class]);
+$router->post('/checkins',     [CheckinController::class, 'store'],   [StaffMiddleware::class]);
+$router->put('/checkins/:id',  [CheckinController::class, 'update'],  [StaffMiddleware::class]);
+$router->delete('/checkins/:id',[CheckinController::class, 'destroy'],[StaffMiddleware::class]);
+$router->post('/checkins/:id/status',[CheckinController::class, 'updateStatus'],[StaffMiddleware::class]);
 
 // ─── Coach: Messages ──────────────────────────────────────────────────────────
 // Static routes MUST be registered before the dynamic :clientId route to prevent
 // "unread" and "read-all" from being parsed as a MongoDB ObjectId.
-$router->get('/messages/unread',         [MessageController::class, 'unreadMessages'],  [CoachMiddleware::class]);
-$router->get('/messages/unread-count',   [MessageController::class, 'unreadCount'],     [CoachMiddleware::class]);
-$router->post('/messages/read-all',      [MessageController::class, 'markAllRead'],     [CoachMiddleware::class]);
-$router->get('/messages/:clientId/typing', [MessageController::class, 'coachTypingStatus'], [CoachMiddleware::class]);
-$router->post('/messages/:clientId/typing', [MessageController::class, 'updateCoachTyping'], [CoachMiddleware::class]);
-$router->get('/messages/:clientId', [MessageController::class, 'coachThread'], [CoachMiddleware::class]);
-$router->post('/messages',          [MessageController::class, 'send'],        [CoachMiddleware::class]);
-$router->post('/messages/upload-media', [MessageController::class, 'uploadMedia'], [CoachMiddleware::class]);
+$router->get('/messages/unread',         [MessageController::class, 'unreadMessages'],  [StaffMiddleware::class]);
+$router->get('/messages/unread-count',   [MessageController::class, 'unreadCount'],     [StaffMiddleware::class]);
+$router->post('/messages/read-all',      [MessageController::class, 'markAllRead'],     [StaffMiddleware::class]);
+$router->get('/messages/:clientId/typing', [MessageController::class, 'coachTypingStatus'], [StaffMiddleware::class]);
+$router->post('/messages/:clientId/typing', [MessageController::class, 'updateCoachTyping'], [StaffMiddleware::class]);
+$router->get('/messages/:clientId', [MessageController::class, 'coachThread'], [StaffMiddleware::class]);
+$router->post('/messages',          [MessageController::class, 'send'],        [StaffMiddleware::class]);
+$router->post('/messages/upload-media', [MessageController::class, 'uploadMedia'], [StaffMiddleware::class]);
 
 // ─── Client Routes ────────────────────────────────────────────────────────────
 $router->get('/client/profile',               [ClientController::class, 'clientProfile'], [ClientMiddleware::class]);
@@ -172,18 +178,18 @@ $router->post('/client/media/upload',         [MediaController::class, 'uploadFi
 $router->post('/media/presigned-url',         [MediaController::class, 'presignedUrl'],     [ClientMiddleware::class]);
 
 // ─── Coach: Live Training ─────────────────────────────────────────────────────
-$router->get('/live-training',                         [LiveTrainingController::class, 'index'],          [CoachMiddleware::class]);
-$router->post('/live-training',                        [LiveTrainingController::class, 'store'],          [CoachMiddleware::class]);
-$router->get('/live-training/:id',                     [LiveTrainingController::class, 'show'],           [CoachMiddleware::class]);
-$router->put('/live-training/:id',                     [LiveTrainingController::class, 'update'],         [CoachMiddleware::class]);
-$router->delete('/live-training/:id',                  [LiveTrainingController::class, 'destroy'],        [CoachMiddleware::class]);
-$router->post('/live-training/:id/go-live',            [LiveTrainingController::class, 'goLive'],         [CoachMiddleware::class]);
-$router->post('/live-training/:id/end',                [LiveTrainingController::class, 'endSession'],     [CoachMiddleware::class]);
-$router->get('/live-training/:id/requests',            [LiveTrainingController::class, 'listRequests'],   [CoachMiddleware::class]);
-$router->post('/live-training/:id/requests',           [LiveTrainingController::class, 'handleRequest'],  [CoachMiddleware::class]);
-$router->get('/live-training/:id/participants',        [LiveTrainingController::class, 'participants'],   [CoachMiddleware::class]);
-$router->get('/live-training/:id/chat',                [LiveTrainingController::class, 'getChat'],        [CoachMiddleware::class]);
-$router->post('/live-training/:id/chat',               [LiveTrainingController::class, 'sendChat'],       [CoachMiddleware::class]);
+$router->get('/live-training',                         [LiveTrainingController::class, 'index'],          [StaffMiddleware::class]);
+$router->post('/live-training',                        [LiveTrainingController::class, 'store'],          [StaffMiddleware::class]);
+$router->get('/live-training/:id',                     [LiveTrainingController::class, 'show'],           [StaffMiddleware::class]);
+$router->put('/live-training/:id',                     [LiveTrainingController::class, 'update'],         [StaffMiddleware::class]);
+$router->delete('/live-training/:id',                  [LiveTrainingController::class, 'destroy'],        [StaffMiddleware::class]);
+$router->post('/live-training/:id/go-live',            [LiveTrainingController::class, 'goLive'],         [StaffMiddleware::class]);
+$router->post('/live-training/:id/end',                [LiveTrainingController::class, 'endSession'],     [StaffMiddleware::class]);
+$router->get('/live-training/:id/requests',            [LiveTrainingController::class, 'listRequests'],   [StaffMiddleware::class]);
+$router->post('/live-training/:id/requests',           [LiveTrainingController::class, 'handleRequest'],  [StaffMiddleware::class]);
+$router->get('/live-training/:id/participants',        [LiveTrainingController::class, 'participants'],   [StaffMiddleware::class]);
+$router->get('/live-training/:id/chat',                [LiveTrainingController::class, 'getChat'],        [StaffMiddleware::class]);
+$router->post('/live-training/:id/chat',               [LiveTrainingController::class, 'sendChat'],       [StaffMiddleware::class]);
 
 // ─── Client: Live Training ────────────────────────────────────────────────────
 $router->get('/client/live-training',                  [LiveTrainingController::class, 'clientIndex'],          [ClientMiddleware::class]);
@@ -194,14 +200,14 @@ $router->get('/client/live-training/:id/chat',         [LiveTrainingController::
 $router->post('/client/live-training/:id/chat',        [LiveTrainingController::class, 'clientSendChat'],       [ClientMiddleware::class]);
 
 // ─── Coach: Coaching Sessions ─────────────────────────────────────────────────
-$router->get('/coaching-sessions',                         [CoachingSessionController::class, 'index'],        [CoachMiddleware::class]);
-$router->post('/coaching-sessions',                        [CoachingSessionController::class, 'store'],         [CoachMiddleware::class]);
-$router->get('/coaching-sessions/:id',                     [CoachingSessionController::class, 'show'],          [CoachMiddleware::class]);
-$router->put('/coaching-sessions/:id',                     [CoachingSessionController::class, 'update'],        [CoachMiddleware::class]);
-$router->delete('/coaching-sessions/:id',                [CoachingSessionController::class, 'destroy'],       [CoachMiddleware::class]);
-$router->post('/coaching-sessions/:id/status',           [CoachingSessionController::class, 'updateStatus'],   [CoachMiddleware::class]);
-$router->post('/coaching-sessions/:id/token',            [CoachingSessionController::class, 'getToken'],      [CoachMiddleware::class]);
-$router->post('/coaching-sessions/:id/notes',            [CoachingSessionController::class, 'saveNotes'],      [CoachMiddleware::class]);
+$router->get('/coaching-sessions',                         [CoachingSessionController::class, 'index'],        [StaffMiddleware::class]);
+$router->post('/coaching-sessions',                        [CoachingSessionController::class, 'store'],         [StaffMiddleware::class]);
+$router->get('/coaching-sessions/:id',                     [CoachingSessionController::class, 'show'],          [StaffMiddleware::class]);
+$router->put('/coaching-sessions/:id',                     [CoachingSessionController::class, 'update'],        [StaffMiddleware::class]);
+$router->delete('/coaching-sessions/:id',                [CoachingSessionController::class, 'destroy'],       [StaffMiddleware::class]);
+$router->post('/coaching-sessions/:id/status',           [CoachingSessionController::class, 'updateStatus'],   [StaffMiddleware::class]);
+$router->post('/coaching-sessions/:id/token',            [CoachingSessionController::class, 'getToken'],      [StaffMiddleware::class]);
+$router->post('/coaching-sessions/:id/notes',            [CoachingSessionController::class, 'saveNotes'],      [StaffMiddleware::class]);
 
 // ─── Client: Coaching Sessions ──────────────────────────────────────────────────
 $router->get('/client/coaching-sessions',                  [CoachingSessionController::class, 'clientIndex'],       [ClientMiddleware::class]);
@@ -216,21 +222,27 @@ $router->post('/client/meal-logs',   [MealLogController::class, 'store'],   [Cli
 $router->delete('/client/meal-logs', [MealLogController::class, 'destroy'], [ClientMiddleware::class]);
 
 // ─── Coach: Meal Logs + Adherence ─────────────────────────────────────────────
-$router->get('/coach/clients/:id/meal-logs', [MealLogController::class, 'clientLogs'], [CoachMiddleware::class]);
-$router->get('/coach/clients/:id/adherence', [MealLogController::class, 'adherence'],  [CoachMiddleware::class]);
+$router->get('/coach/clients/:id/meal-logs', [MealLogController::class, 'clientLogs'], [StaffMiddleware::class]);
+$router->get('/coach/clients/:id/adherence', [MealLogController::class, 'adherence'],  [StaffMiddleware::class]);
 
 // ─── Client: Wearable ─────────────────────────────────────────────────────────
 $router->post('/client/wearable/data',           [WearableController::class, 'pushData'],      [ClientMiddleware::class]);
 $router->get('/client/wearable/status',          [WearableController::class, 'status'],        [ClientMiddleware::class]);
 $router->delete('/client/wearable/disconnect',   [WearableController::class, 'disconnect'],    [ClientMiddleware::class]);
 $router->get('/client/wearable/fitbit/connect',  [WearableController::class, 'fitbitConnect'], [ClientMiddleware::class]);
+$router->post('/client/wearable/fitbit/sync',    [WearableController::class, 'fitbitSync'],   [ClientMiddleware::class]);
 $router->get('/client/wearable/fitbit/callback', [WearableController::class, 'fitbitCallback']);
+$router->post('/client/wearable/fitbit/exchange', [WearableController::class, 'fitbitExchange'], [ClientMiddleware::class]);
+$router->post('/client/wearable/apple-watch/push', [WearableController::class, 'appleWatchPush'], [ClientMiddleware::class]);
+$router->get('/client/wearable/sharing',            [WearableController::class, 'getSharing'],     [ClientMiddleware::class]);
+$router->put('/client/wearable/sharing',            [WearableController::class, 'updateSharing'],  [ClientMiddleware::class]);
 
-// ─── Coach: Client Wearable Data ─────────────────────────────────────────────
-$router->get('/coach/clients/:id/wearable', [WearableController::class, 'clientData'], [CoachMiddleware::class]);
+$router->get('/coach/clients/:id/wearable',         [WearableController::class, 'clientData'], [StaffMiddleware::class]);
+$router->get('/coach/clients/:id/wearable/trend',   [WearableController::class, 'trend'],      [StaffMiddleware::class]);
+$router->get('/coach/clients/:id/wearable/sessions',[WearableController::class, 'sessions'],   [StaffMiddleware::class]);
 
 // ─── Progress Prediction ──────────────────────────────────────────────────────
-$router->get('/coach/clients/:id/prediction', [PredictionController::class, 'show'], [CoachMiddleware::class]);
+$router->get('/coach/clients/:id/prediction', [PredictionController::class, 'show'], [StaffMiddleware::class]);
 $router->get('/client/prediction',            [PredictionController::class, 'show'], [ClientMiddleware::class]);
 
 // ─── Subscription ─────────────────────────────────────────────────────────────
@@ -238,6 +250,8 @@ $router->post('/subscription/select-plan',   [SubscriptionController::class, 'se
 $router->post('/subscription/setup-trial',   [SubscriptionController::class, 'setupTrial'],   [SetupAuthMiddleware::class]);
 $router->post('/subscription/confirm-trial', [SubscriptionController::class, 'confirmTrial'], [SetupAuthMiddleware::class]);
 $router->get('/subscription',          [SubscriptionController::class, 'status'],   [CoachMiddleware::class]);
+$router->get('/subscription/billing-information', [SubscriptionController::class, 'billingInformation'], [CoachMiddleware::class]);
+$router->put('/subscription/billing-information', [SubscriptionController::class, 'updateBillingInformation'], [CoachMiddleware::class]);
 $router->post('/subscription/checkout',[SubscriptionController::class, 'checkout'], [CoachMiddleware::class]);
 $router->post('/subscription/portal',  [SubscriptionController::class, 'portal'],   [CoachMiddleware::class]);
 $router->post('/subscription/cancel',  [SubscriptionController::class, 'cancel'],   [CoachMiddleware::class]);
@@ -268,10 +282,13 @@ require_once BASE_PATH . '/routes/notifications.php';
 // staff JWT, resolving org_id + role onto $params for every route below.
 $router->post('/org/staff/invite',        [StaffController::class, 'invite'],       [StaffMiddleware::class]);
 $router->get('/org/staff',                [StaffController::class, 'index'],        [StaffMiddleware::class]);
-$router->post('/org/staff/accept-invite', [StaffController::class, 'acceptInvite']);
+$router->get('/org/staff/:id',            [StaffController::class, 'show'],         [StaffMiddleware::class]);
+$router->post('/org/staff/accept-invite', [StaffController::class, 'acceptInvite'], [AuthRateLimitMiddleware::class]);
 $router->patch('/org/staff/:id/role',     [StaffController::class, 'updateRole'],    [StaffMiddleware::class]);
 $router->post('/org/staff/:id/deactivate',[StaffController::class, 'deactivate'],    [StaffMiddleware::class]);
 $router->patch('/org/clients/:id/assignment', [StaffController::class, 'assignClient'], [StaffMiddleware::class]);
+$router->get('/org/staff/activities',       [StaffController::class, 'activities'],    [StaffMiddleware::class]);
+$router->put('/staff/profile',              [StaffController::class, 'updateProfile'],  [StaffMiddleware::class]);
 
 // ─── Sports-science Assessments (Feature 7) ──────────────────────────────────
 $router->post('/org/clients/:id/assessments',        [AssessmentController::class, 'store'],  [StaffMiddleware::class]);
@@ -279,16 +296,16 @@ $router->get('/org/clients/:id/assessments',          [AssessmentController::cla
 $router->get('/org/clients/:id/assessments/latest',   [AssessmentController::class, 'latest'], [StaffMiddleware::class]);
 
 // ─── Studio Operations (Feature 9) ───────────────────────────────────────────
-$router->post('/org/classes',                 [StudioController::class, 'createClass'],  [StaffMiddleware::class]);
-$router->get('/org/classes',                  [StudioController::class, 'index'],        [StaffMiddleware::class]);
-$router->get('/client/classes',               [StudioController::class, 'indexForClient'],[ClientMiddleware::class]);
-$router->post('/client/classes/:id/book',     [StudioController::class, 'bookAsClient'], [ClientMiddleware::class]);
-$router->post('/org/classes/:id/book',        [StudioController::class, 'bookAsStaff'],  [StaffMiddleware::class]);
-$router->post('/client/bookings/:id/cancel',  [StudioController::class, 'cancelAsClient'],[ClientMiddleware::class]);
-$router->post('/org/bookings/:id/cancel',     [StudioController::class, 'cancelAsStaff'], [StaffMiddleware::class]);
-$router->post('/org/memberships',             [StudioController::class, 'createMembership'],       [StaffMiddleware::class]);
-$router->get('/org/memberships',              [StudioController::class, 'listMemberships'],        [StaffMiddleware::class]);
-$router->post('/org/memberships/:id/status',  [StudioController::class, 'updateMembershipStatus'],  [StaffMiddleware::class]);
+$router->post('/org/classes',                 [StudioClassController::class, 'createClass'],  [StaffMiddleware::class]);
+$router->get('/org/classes',                  [StudioClassController::class, 'index'],        [StaffMiddleware::class]);
+$router->get('/client/classes',               [StudioClassController::class, 'indexForClient'],[ClientMiddleware::class]);
+$router->post('/client/classes/:id/book',     [StudioBookingController::class, 'bookAsClient'], [ClientMiddleware::class]);
+$router->post('/org/classes/:id/book',        [StudioBookingController::class, 'bookAsStaff'],  [StaffMiddleware::class]);
+$router->post('/client/bookings/:id/cancel',  [StudioBookingController::class, 'cancelAsClient'],[ClientMiddleware::class]);
+$router->post('/org/bookings/:id/cancel',     [StudioBookingController::class, 'cancelAsStaff'], [StaffMiddleware::class]);
+$router->post('/org/memberships',             [StudioMembershipController::class, 'createMembership'],       [StaffMiddleware::class]);
+$router->get('/org/memberships',              [StudioMembershipController::class, 'listMemberships'],        [StaffMiddleware::class]);
+$router->post('/org/memberships/:id/status',  [StudioMembershipController::class, 'updateMembershipStatus'],  [StaffMiddleware::class]);
 $router->post('/client/consent-documents',    [StudioController::class, 'signConsentAsClient'],     [ClientMiddleware::class]);
 $router->post('/org/clients/:id/checkin',     [StudioController::class, 'checkinAsStaff'],  [StaffMiddleware::class]);
 $router->post('/client/checkin',              [StudioController::class, 'checkinAsClient'], [ClientMiddleware::class]);
@@ -305,8 +322,4 @@ $router->post('/client/rehab-tracks/:id/pain-logs',  [RehabController::class, 'l
 $router->post('/org/rehab-tracks/:id/soap-notes',    [RehabController::class, 'addSoapNote'],   [StaffMiddleware::class]);
 $router->get('/org/rehab-tracks/:id/soap-notes',     [RehabController::class, 'listSoapNotes'], [StaffMiddleware::class]);
 
-// ─── Client: Notifications ────────────────────────────────────────────────────
-$router->get('/client/notifications',               [NotificationsController::class, 'clientIndex'],       [ClientMiddleware::class]);
-$router->get('/client/notifications/unread-count',  [NotificationsController::class, 'clientUnreadCount'], [ClientMiddleware::class]);
-$router->post('/client/notifications/:id/read',     [NotificationsController::class, 'clientMarkRead'],    [ClientMiddleware::class]);
-$router->post('/client/notifications/read-all',     [NotificationsController::class, 'clientMarkAllRead'], [ClientMiddleware::class]);
+
