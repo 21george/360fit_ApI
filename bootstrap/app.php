@@ -44,6 +44,11 @@ if (($_ENV['APP_ENV'] ?? '') === 'production') {
     header('Strict-Transport-Security: max-age=63072000; includeSubDomains; preload');
 }
 
+// Content-Security-Policy for API responses (prevents XSS, clickjacking via frames, etc.)
+$apiOrigin = $_ENV['APP_URL'] ?? '';
+$cspConnectSrc = $apiOrigin ? "'self' {$apiOrigin}" : "'self'";
+header("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src {$cspConnectSrc}; frame-ancestors 'none'; base-uri 'self'; form-action 'self';");
+
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     echo json_encode([]);
@@ -72,6 +77,16 @@ set_exception_handler(function (Throwable $e) {
     $logFile = BASE_PATH . '/storage/logs/error.log';
     if (is_writable(dirname($logFile))) {
         file_put_contents($logFile, date('Y-m-d H:i:s') . ' - ' . $errorMsg . PHP_EOL, FILE_APPEND);
+    }
+
+    // ErrorException from the custom error handler: warnings/notices
+    // should be logged but not crash the request as 500s.
+    if ($e instanceof \ErrorException) {
+        $severity = $e->getSeverity();
+        // Warnings and notices are client/data issues, not server crashes
+        if ($severity === E_WARNING || $severity === E_NOTICE || $severity === E_USER_WARNING || $severity === E_USER_NOTICE) {
+            Response::json(['error' => 'Invalid request: ' . $e->getMessage()], 400);
+        }
     }
 
     // Bad inputs from the client should be 4xx, not 5xx. Map the
