@@ -238,6 +238,87 @@ class CoachController {
         return $data;
     }
 
+    /**
+     * PUT /coach/fcm-token
+     *
+     * Update the authenticated coach's FCM token for push notifications.
+     */
+    public function updateFcmToken(array $params): void
+    {
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
+        $body    = Request::body();
+        $errors  = Request::validate($body, ['fcm_token' => 'required']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'fcm_token'  => trim((string) $body['fcm_token']),
+                'updated_at' => new UTCDateTime(),
+            ]]
+        );
+
+        Response::success(null, 'FCM token updated');
+    }
+
+    /**
+     * PUT /coach/branding
+     *
+     * Update the authenticated coach's white-label branding.
+     * Body: { app_name?, primary_color?, logo_url?, favicon_url? }
+     */
+    public function updateBranding(array $params): void
+    {
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
+        $body    = Request::body();
+
+        $allowed = ['app_name', 'primary_color', 'logo_url', 'favicon_url'];
+        $branding = array_filter(
+            $body,
+            fn(string $k): bool => in_array($k, $allowed, true),
+            ARRAY_FILTER_USE_KEY
+        );
+
+        if (isset($branding['primary_color'])) {
+            $color = trim((string) $branding['primary_color']);
+            if (!preg_match('/^#[a-f0-9]{6}$/i', $color)) {
+                Response::error('primary_color must be a hex color like #3B82F6', 422);
+            }
+            $branding['primary_color'] = strtolower($color);
+        }
+
+        if (isset($branding['app_name'])) {
+            $branding['app_name'] = trim((string) $branding['app_name']);
+        }
+
+        foreach (['logo_url', 'favicon_url'] as $urlField) {
+            if (isset($branding[$urlField])) {
+                $url = trim((string) $branding[$urlField]);
+                if (!filter_var($url, FILTER_VALIDATE_URL)) {
+                    Response::error("{$urlField} must be a valid URL", 422);
+                }
+                if (!str_starts_with($url, 'https://')) {
+                    Response::error("{$urlField} must use HTTPS", 422);
+                }
+                $branding[$urlField] = $url;
+            }
+        }
+
+        if (empty($branding)) {
+            Response::error('No valid branding fields provided', 422);
+        }
+
+        Database::collection('coaches')->updateOne(
+            ['_id' => $coachId],
+            ['$set' => [
+                'branding'   => $branding,
+                'updated_at' => new UTCDateTime(),
+            ]]
+        );
+
+        Response::success($branding, 'Branding updated');
+    }
+
     private function getClientCount(string $coachId): int {
         return ScopedCollection::for('clients')->countDocuments([
             'coach_id' => new ObjectId($coachId),
@@ -271,6 +352,7 @@ class CoachController {
             'subscription_tier'      => $tier,
             'subscription_status'    => $coach['subscription_status'] ?? 'none',
             'trial_ends_at'          => isset($coach['trial_ends_at']) ? (string) $coach['trial_ends_at'] : null,
+            'branding'               => $coach['branding'] ?? null,
             'created_at'             => isset($coach['created_at']) ? $coach['created_at']->toDateTime()->format('c') : null,
         ];
     }

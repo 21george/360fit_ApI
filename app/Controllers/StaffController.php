@@ -5,7 +5,7 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Helpers\{Request, Response};
-use App\Services\{EmailService, JwtService};
+use App\Services\{EmailService, JwtService, ActivityLogService, NotificationTriggerService, ProfilePhotoService};
 use MongoDB\BSON\ObjectId;
 use MongoDB\BSON\UTCDateTime;
 
@@ -108,13 +108,30 @@ class StaffController
     // GET /org/staff
     public function index(array $params): void
     {
-        $orgId = new ObjectId($params['_org_id']);
+        $orgId   = new ObjectId($params['_org_id']);
+        $page    = max(1, (int) Request::get('page', 1));
+        $perPage = min(50, max(1, (int) Request::get('per_page', 20)));
+        $skip    = ($page - 1) * $perPage;
+
+        $filter = ['org_id' => $orgId];
+
+        $total = Database::collection('staff')->countDocuments($filter);
+
         $staff = Database::collection('staff')->find(
-            ['org_id' => $orgId],
-            ['sort' => ['created_at' => 1]]
+            $filter,
+            [
+                'sort'  => ['created_at' => 1],
+                'skip'  => $skip,
+                'limit' => $perPage,
+            ]
         )->toArray();
 
-        Response::success(array_map(fn($s) => $this->format((array) $s), $staff));
+        Response::paginated(
+            array_map(fn($s) => $this->format((array) $s), $staff),
+            $total,
+            $page,
+            $perPage
+        );
     }
 
     // GET /org/staff/:id
@@ -127,7 +144,10 @@ class StaffController
         ]);
         if (!$staff) Response::notFound('Staff member not found');
 
-        Response::success($this->format((array) $staff));
+        $data = $this->format((array) $staff);
+        $data = $this->resolveProfilePhoto($data, $staff);
+
+        Response::success($data);
     }
 
     // POST /org/staff/accept-invite  (public — authenticated via invite token, not StaffMiddleware)
@@ -305,6 +325,101 @@ class StaffController
         Response::success(null, 'Client assignment updated');
     }
 
+    // POST /org/clients/:id/take-on
+    public function takeOnClient(array $params): void
+    {
+        if (!in_array($params['_role'], ['instructor_coach', 'admin', 'owner'], true)) {
+            Response::error('Forbidden: only instructors, admins, and owners can take on clients', 403);
+        }
+
+        $orgId    = new ObjectId($params['_org_id']);
+        $clientId = new ObjectId($params['id']);
+        $client   = Database::collection('clients')->findOne(['_id' => $clientId, 'coach_id' => $orgId]);
+        if (!$client) Response::notFound('Client not found');
+
+        // A client can only be taken on if they have no primary_staff_id yet.
+        // Owners/admins can reassign via assignClient; take-on is for unassigned clients only.
+        if (!empty($client['primary_staff_id'])) {
+            Response::error('Client is already assigned to another coach. Only unassigned clients can be taken on.', 409);
+        }
+
+        $staffId = new ObjectId((string) $params['_auth']['sub']);
+        $staff   = Database::collection('staff')->findOne(['_id' => $staffId, 'org_id' => $orgId, 'status' => 'active']);
+        if (!$staff) Response::error('Staff account not found', 404);
+
+        Database::collection('clients')->updateOne(
+            ['_id' => $clientId],
+            ['$set' => [
+                'primary_staff_id' => $staffId,
+                'updated_at'       => new UTCDateTime(),
+            ]]
+        );
+
+        ActivityLogService::log('client_taken_on', (string) $clientId, $client['name'] ?? '', [
+            'previous_staff_id' => isset($client['primary_staff_id']) ? (string) $client['primary_staff_id'] : null,
+        ]);
+
+        $service = new NotificationTriggerService();
+        $service->notifyClientCoachAssigned(
+            (string) $clientId,
+            $staff['name'] ?? 'Your coach',
+            (string) $staffId
+        );
+
+        Response::success(null, 'Client taken on successfully');
+    }
+
+    // PUT /org/staff/:id  (admin/owner only)
+    public function updateStaff(array $params): void
+    {
+        if (!in_array($params['_role'], ['owner', 'admin'], true)) {
+            Response::error('Forbidden: only owners and admins can update staff', 403);
+        }
+
+        $body   = Request::body();
+        $errors = Request::validate($body, ['name' => 'required|min:2']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        $staffId = new ObjectId($params['id']);
+        $orgId   = new ObjectId($params['_org_id']);
+        $now     = new UTCDateTime();
+
+        $set = [
+            'name'       => trim($body['name']),
+            'updated_at' => $now,
+        ];
+
+        if (!empty($body['role']) && in_array($body['role'], self::VALID_ROLES, true)) {
+            $set['role'] = $body['role'];
+        }
+
+        Database::collection('staff')->updateOne(
+            ['_id' => $staffId, 'org_id' => $orgId],
+            ['$set' => $set]
+        );
+
+        $staff = Database::collection('staff')->findOne(['_id' => $staffId]);
+        if (!$staff) Response::error('Staff member not found', 404);
+
+        $data = $this->format((array) $staff);
+        $data = $this->resolveProfilePhoto($data, $staff);
+
+        Response::success($data, 'Staff updated');
+    }
+
+    // GET /staff/profile
+    public function getProfile(array $params): void
+    {
+        $staffId = new ObjectId($params['_auth']['sub']);
+        $staff   = Database::collection('staff')->findOne(['_id' => $staffId]);
+        if (!$staff) Response::error('Staff member not found', 404);
+
+        $data = $this->format((array) $staff);
+        $data = $this->resolveProfilePhoto($data, $staff);
+
+        Response::success($data);
+    }
+
     // PUT /staff/profile
     public function updateProfile(array $params): void
     {
@@ -315,24 +430,105 @@ class StaffController
         $staffId = new ObjectId($params['_auth']['sub']);
         $now     = new UTCDateTime();
 
+        $set = [
+            'name'       => trim($body['name']),
+            'updated_at' => $now,
+        ];
+
+        // Optional profile fields
+        if (isset($body['date_of_birth'])) {
+            $dob = trim($body['date_of_birth']);
+            if ($dob !== '' && strtotime($dob) === false) {
+                Response::error('Invalid date_of_birth format', 422);
+            }
+            $set['date_of_birth'] = $dob === '' ? null : $dob;
+        }
+        if (isset($body['nationality'])) {
+            $set['nationality'] = substr(trim((string) $body['nationality']), 0, 100);
+        }
+        if (isset($body['years_of_profession'])) {
+            $yop = filter_var($body['years_of_profession'], FILTER_VALIDATE_INT);
+            if ($yop === false || $yop < 0 || $yop > 80) {
+                Response::error('years_of_profession must be an integer between 0 and 80', 422);
+            }
+            $set['years_of_profession'] = $yop;
+        }
+        if (isset($body['bio'])) {
+            $set['bio'] = substr(trim((string) $body['bio']), 0, 2000);
+        }
+
         Database::collection('staff')->updateOne(
             ['_id' => $staffId],
-            ['$set' => [
-                'name'       => trim($body['name']),
-                'updated_at' => $now,
-            ]]
+            ['$set' => $set]
         );
 
         $staff = Database::collection('staff')->findOne(['_id' => $staffId]);
         if (!$staff) Response::error('Staff member not found', 404);
 
-        Response::success([
-            'id'     => (string) $staff['_id'],
-            'name'   => $staff['name'] ?? '',
-            'email'  => $staff['email'],
-            'role'   => $staff['role'],
-            'org_id' => (string) $staff['org_id'],
-        ], 'Profile updated');
+        $data = $this->format((array) $staff);
+        $data = $this->resolveProfilePhoto($data, $staff);
+
+        Response::success($data, 'Profile updated');
+    }
+
+    // POST /staff/profile/photo
+    public function uploadProfilePhoto(array $params): void
+    {
+        $staffId    = $params['_auth']['sub'];
+        $staffIdObj = new ObjectId($staffId);
+        $ext        = (string) Request::get('ext', 'jpg');
+
+        if (!ProfilePhotoService::validateExt($ext)) {
+            Response::error('Invalid file type. Allowed: jpg, jpeg, png, webp', 422);
+        }
+
+        $staff = Database::collection('staff')->findOne(
+            ['_id' => $staffIdObj],
+            ['projection' => ['profile_photo_key' => 1]]
+        );
+
+        try {
+            $result = ProfilePhotoService::upload($staffId, 'staff', $ext, $staff['profile_photo_key'] ?? null);
+        } catch (\RuntimeException $e) {
+            Response::error($e->getMessage(), $e->getMessage() === 'No photo file provided' ? 422 : 500);
+        }
+
+        Database::collection('staff')->updateOne(
+            ['_id' => $staffIdObj],
+            ['$set' => [
+                'profile_photo'     => $result['url'],
+                'profile_photo_key' => $result['key'],
+                'updated_at'        => new UTCDateTime(),
+            ]]
+        );
+
+        $response = ['profile_photo' => $result['url']];
+        if (isset($result['upload_url'])) {
+            $response['upload_url'] = $result['upload_url'];
+            $response['key']        = $result['key'];
+        }
+
+        Response::success($response, isset($result['upload_url']) ? 'Upload URL generated' : 'Photo uploaded');
+    }
+
+    // DELETE /staff/profile/photo
+    public function deleteProfilePhoto(array $params): void
+    {
+        $staffId    = $params['_auth']['sub'];
+        $staffIdObj = new ObjectId($staffId);
+        $staff      = Database::collection('staff')->findOne(
+            ['_id' => $staffIdObj],
+            ['projection' => ['profile_photo_key' => 1]]
+        );
+
+        ProfilePhotoService::deleteByKey($staff['profile_photo_key'] ?? null);
+
+        Database::collection('staff')->updateOne(
+            ['_id' => $staffIdObj],
+            ['$set' => ['profile_photo' => null, 'profile_photo_key' => null, 'updated_at' => new UTCDateTime()]]
+        );
+
+        Response::success(null, 'Profile photo deleted');
     }
 
     // GET /org/staff/activities
@@ -389,15 +585,25 @@ class StaffController
     private function format(array $s): array
     {
         return [
-            'id'           => (string) $s['_id'],
-            'org_id'       => (string) $s['org_id'],
-            'email'        => $s['email'],
-            'name'         => $s['name'] ?? '',
-            'role'         => $s['role'],
-            'status'       => $s['status'],
-            'invited_at'   => isset($s['invited_at']) ? (string) $s['invited_at'] : null,
-            'activated_at' => isset($s['activated_at']) ? (string) $s['activated_at'] : null,
+            'id'                   => (string) $s['_id'],
+            'org_id'               => (string) $s['org_id'],
+            'email'                => $s['email'],
+            'name'                 => $s['name'] ?? '',
+            'role'                 => $s['role'],
+            'status'               => $s['status'],
+            'invited_at'           => isset($s['invited_at']) ? (string) $s['invited_at'] : null,
+            'activated_at'         => isset($s['activated_at']) ? (string) $s['activated_at'] : null,
+            'date_of_birth'        => $s['date_of_birth'] ?? null,
+            'nationality'          => $s['nationality'] ?? '',
+            'years_of_profession'  => $s['years_of_profession'] ?? 0,
+            'bio'                  => $s['bio'] ?? '',
         ];
+    }
+
+    private function resolveProfilePhoto(array $data, $record): array
+    {
+        $data['profile_photo'] = ProfilePhotoService::resolveUrl($record['profile_photo_key'] ?? null) ?? $data['profile_photo'] ?? null;
+        return $data;
     }
 
     // ── Cookie / refresh-token helpers duplicated from AuthController ───────────

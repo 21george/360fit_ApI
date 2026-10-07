@@ -338,6 +338,27 @@ class NotificationTriggerService
     }
 
     /**
+     * Notify client when a coach is assigned to them
+     */
+    public function notifyClientCoachAssigned(string $clientId, string $coachName, string $coachId): void
+    {
+        $notification = [
+            'user_id'    => new ObjectId($clientId),
+            'user_type'  => 'client',
+            'type'       => 'coach_assigned',
+            'title'      => 'New Coach Assigned',
+            'body'       => "{$coachName} is now your primary coach",
+            'data'       => ['coach_id' => $coachId, 'coach_name' => $coachName],
+            'read'       => false,
+            'sent_at'    => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $notification['data']);
+    }
+
+    /**
      * Notify client when a new workout plan is assigned to them
      */
     public function notifyClientNewPlan(string $planTitle, string $planId, string $clientId, string $planType = 'workout'): void
@@ -506,6 +527,44 @@ class NotificationTriggerService
     }
 
     /**
+     * Helper: Check if DND (Do Not Disturb) is active for a given coach.
+     * DND settings are stored in coach.notification_settings.
+     * Respects coach.timezone if set; falls back to UTC.
+     */
+    private function isDndActive(array $coach): bool
+    {
+        $settings = $coach['notification_settings'] ?? [];
+        if (empty($settings['dnd_enabled'])) {
+            return false;
+        }
+
+        $timezone = $coach['timezone'] ?? 'UTC';
+        if (!in_array($timezone, \DateTimeZone::listIdentifiers(), true)) {
+            $timezone = 'UTC';
+        }
+
+        $now = new \DateTime('now', new \DateTimeZone($timezone));
+        $from = $settings['dnd_from'] ?? '22:00';
+        $to   = $settings['dnd_to']   ?? '08:00';
+
+        $currentMinutes = (int) $now->format('G') * 60 + (int) $now->format('i');
+        [$fromHour, $fromMin] = array_map('intval', explode(':', $from));
+        [$toHour, $toMin]     = array_map('intval', explode(':', $to));
+        $fromMinutes = $fromHour * 60 + $fromMin;
+        $toMinutes   = $toHour * 60 + $toMin;
+
+        if ($fromMinutes === $toMinutes) {
+            return false; // No DND window set
+        }
+
+        if ($fromMinutes < $toMinutes) {
+            return $currentMinutes >= $fromMinutes && $currentMinutes < $toMinutes;
+        }
+        // DND window wraps across midnight (e.g., 22:00 → 08:00)
+        return $currentMinutes >= $fromMinutes || $currentMinutes < $toMinutes;
+    }
+
+    /**
      * Helper: Send push notification to coach
      */
     private function sendPushToCoach(ObjectId $coachId, string $title, string $body, array $data = []): void
@@ -513,7 +572,128 @@ class NotificationTriggerService
         $coach = Database::getInstance()->getCollection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach || empty($coach['fcm_token'])) return;
 
+        if ($this->isDndActive((array) $coach)) {
+            // Suppress push during DND — the in-app notification is still stored
+            return;
+        }
+
         FcmService::send($coach['fcm_token'], $title, $body, $data);
+    }
+
+    /**
+     * Notify staff participants when a team meeting is scheduled
+     */
+    public function notifyTeamMeetingScheduled(string $staffId, string $staffName, string $meetingId, string $title, string $scheduledAt, bool $isGroup): void
+    {
+        $formattedTime = date('D M j, g:i A', strtotime($scheduledAt));
+        $meetingType = $isGroup ? 'Group meeting' : '1-on-1 meeting';
+        $data = [
+            'meetingId' => $meetingId,
+            'title' => $title,
+            'scheduledAt' => $scheduledAt,
+            'isGroup' => $isGroup,
+        ];
+
+        $notification = [
+            'user_id' => new ObjectId($staffId),
+            'user_type' => 'staff',
+            'type' => 'team_meeting_scheduled',
+            'title' => 'New Team Meeting',
+            'body' => "{$meetingType} \"{$title}\" scheduled for {$formattedTime}.",
+            'data' => $data,
+            'read' => false,
+            'sent_at' => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToStaff(new ObjectId($staffId), $notification['title'], $notification['body'], $data);
+    }
+
+    /**
+     * Notify coach that a client requested a meeting
+     */
+    public function notifyClientMeetingRequest(string $coachId, string $clientId, string $clientName, string $checkinId, string $scheduledAt, string $type): void
+    {
+        $formattedTime = date('D M j, g:i A', strtotime($scheduledAt));
+        $typeLabels = ['call' => 'Call', 'video' => 'Video', 'chat' => 'Chat'];
+        $typeLabel = $typeLabels[$type] ?? 'Meeting';
+        $data = [
+            'checkinId' => $checkinId,
+            'clientId' => $clientId,
+            'clientName' => $clientName,
+            'scheduledAt' => $scheduledAt,
+            'type' => $type,
+        ];
+
+        $notification = [
+            'user_id' => new ObjectId($coachId),
+            'user_type' => 'coach',
+            'type' => 'client_meeting_request',
+            'title' => 'Client Meeting Request',
+            'body' => "{$clientName} requested a {$typeLabel} for {$formattedTime}.",
+            'data' => $data,
+            'read' => false,
+            'sent_at' => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToCoach(new ObjectId($coachId), $notification['title'], $notification['body'], $data);
+    }
+
+    /**
+     * Notify client that their meeting request was approved
+     */
+    public function notifyClientMeetingApproved(string $clientId, string $checkinId, string $scheduledAt): void
+    {
+        $formattedTime = date('D M j, g:i A', strtotime($scheduledAt));
+        $data = [
+            'checkinId' => $checkinId,
+            'scheduledAt' => $scheduledAt,
+        ];
+
+        $notification = [
+            'user_id' => new ObjectId($clientId),
+            'user_type' => 'client',
+            'type' => 'meeting_request_approved',
+            'title' => 'Meeting Approved',
+            'body' => "Your meeting request for {$formattedTime} was approved.",
+            'data' => $data,
+            'read' => false,
+            'sent_at' => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $data);
+    }
+
+    /**
+     * Notify client that their meeting request was declined
+     */
+    public function notifyClientMeetingDeclined(string $clientId, string $checkinId, string $scheduledAt): void
+    {
+        $formattedTime = date('D M j, g:i A', strtotime($scheduledAt));
+        $data = [
+            'checkinId' => $checkinId,
+            'scheduledAt' => $scheduledAt,
+        ];
+
+        $notification = [
+            'user_id' => new ObjectId($clientId),
+            'user_type' => 'client',
+            'type' => 'meeting_request_declined',
+            'title' => 'Meeting Declined',
+            'body' => "Your meeting request for {$formattedTime} was declined.",
+            'data' => $data,
+            'read' => false,
+            'sent_at' => new UTCDateTime(),
+            'created_at' => new UTCDateTime(),
+        ];
+
+        $this->collection->insertOne($notification);
+        $this->sendPushToClient(new ObjectId($clientId), $notification['title'], $notification['body'], $data);
     }
 
     /**
@@ -525,5 +705,16 @@ class NotificationTriggerService
         if (!$client || empty($client['fcm_token'])) return;
 
         FcmService::send($client['fcm_token'], $title, $body, $data);
+    }
+
+    /**
+     * Helper: Send push notification to staff member
+     */
+    private function sendPushToStaff(ObjectId $staffId, string $title, string $body, array $data = []): void
+    {
+        $staff = Database::getInstance()->getCollection('staff')->findOne(['_id' => $staffId]);
+        if (!$staff || empty($staff['fcm_token'])) return;
+
+        FcmService::send($staff['fcm_token'], $title, $body, $data);
     }
 }

@@ -76,8 +76,11 @@ RUN mkdir -p \
 # Permissions
 # --------------------------------------------------
 RUN chown -R www-data:www-data \
+        /var/www/html/public \
         /var/www/html/storage \
         /var/www/html/bootstrap/cache \
+    && find /var/www/html/public -type d -exec chmod 755 {} + \
+    && find /var/www/html/public -type f -exec chmod 644 {} + \
     && chmod -R 775 \
         /var/www/html/storage \
         /var/www/html/bootstrap/cache

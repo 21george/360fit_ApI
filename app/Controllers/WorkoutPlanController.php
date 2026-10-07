@@ -6,11 +6,21 @@ namespace App\Controllers;
 
 use App\Config\Database;
 use App\Helpers\{Request, Response, ScopedCollection};
-use App\Services\{ExcelImportService, FcmService, NotificationTriggerService};
+use App\Services\{ExcelImportService, FcmService, NotificationTriggerService, ExerciseLibraryService};
 use MongoDB\BSON\ObjectId;
 
 class WorkoutPlanController
 {
+    private ?ExerciseLibraryService $exerciseService = null;
+
+    private function exerciseService(): ExerciseLibraryService
+    {
+        if ($this->exerciseService === null) {
+            $this->exerciseService = new ExerciseLibraryService();
+        }
+        return $this->exerciseService;
+    }
+
     // GET /workout-plans
     public function index(array $params): void
     {
@@ -640,7 +650,49 @@ class WorkoutPlanController
             'notes'           => $doc['notes'] ?? null,
             'created_at'      => (string) ($doc['created_at'] ?? ''),
         ];
-        if ($full) $data['days'] = $doc['days'] ?? [];
+        if ($full) {
+            $data['days'] = $this->enrichDays((array) ($doc['days'] ?? []));
+        }
         return $data;
+    }
+
+    /**
+     * Enrich exercise entries in plan days with data from the exercise library.
+     */
+    private function enrichDays(array $days): array
+    {
+        $enriched = [];
+        foreach ($days as $day) {
+            $dayData = (array) $day;
+            $exercises = (array) ($dayData['exercises'] ?? []);
+            if (!empty($exercises)) {
+                $dayData['exercises'] = array_map(
+                    fn($ex) => $this->enrichExercise((array) $ex),
+                    $exercises
+                );
+            }
+            $enriched[] = $dayData;
+        }
+        return $enriched;
+    }
+
+    private function enrichExercise(array $ex): array
+    {
+        if (!empty($ex['exercise_id'])) {
+            try {
+                $libExercise = $this->exerciseService()->getExerciseById($ex['exercise_id']);
+                if ($libExercise) {
+                    $ex['exercise_name']     = $libExercise['name'];
+                    $ex['exercise_images']   = $libExercise['images'];
+                    $ex['exercise_description'] = $libExercise['description'];
+                    $ex['exercise_equipment'] = $libExercise['equipment'];
+                    $ex['exercise_muscles']  = $libExercise['muscles'];
+                }
+            } catch (\Throwable $e) {
+                // Silently skip enrichment if exercise library lookup fails
+                error_log('Exercise enrichment failed: ' . $e->getMessage());
+            }
+        }
+        return $ex;
     }
 }

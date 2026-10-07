@@ -131,16 +131,16 @@ backend/
 │   ├── Controllers/
 │   │   ├── AuthController.php           # Login, register, refresh, logout (coach/client/staff)
 │   │   ├── ClientController.php         # Coach: manage clients + client profile endpoints
-│   │   ├── CoachController.php          # Coach profile, photo, password
-│   │   ├── WorkoutPlanController.php    # Workout plans + Excel/CSV/Google Drive import
-│   │   ├── WorkoutLogController.php     # Client workout logging + coach progress views
+│   │   ├── CoachController.php          # Coach profile, photo, password, branding
+│   │   ├── WorkoutPlanController.php    # Workout plans + Excel/CSV/Google Drive import + exercise enrichment
+│   │   ├── WorkoutLogController.php     # Client workout logging + coach progress views + trainer review
 │   │   ├── WorkoutAnalysisController.php # AI workout analyses + recommendations/assign
 │   │   ├── NutritionController.php      # Nutrition plans
 │   │   ├── MealLogController.php      # Client meal completion + coach adherence
 │   │   ├── CheckinController.php        # Coach/client check-in meetings
 │   │   ├── MessageController.php        # Coach/client messaging + typing
 │   │   ├── GroupChatController.php      # Group workout plan chat
-│   │   ├── MediaController.php          # Presigned uploads + local upload + coach/client media
+│   │   ├── MediaController.php          # Presigned uploads + local upload + coach/client media + body measurements
 │   │   ├── AnalyticsController.php      # Coach + client analytics (aggregate + self)
 │   │   ├── LiveTrainingController.php   # Live training sessions (coach + client)
 │   │   ├── CoachingSessionController.php # 1-on-1 coaching sessions + LiveKit tokens
@@ -150,13 +150,20 @@ backend/
 │   │   ├── FoodController.php           # Food search (local + USDA), custom foods
 │   │   ├── WearableController.php     # Wearable push/Fitbit + coach trend data
 │   │   ├── PredictionController.php     # 2-month weight/body-fat prediction
-│   │   ├── StaffController.php          # Org staff invites + role management
+│   │   ├── StaffController.php          # Org staff invites, role management, profile updates, photo upload, client assignment/take-on
 │   │   ├── AssessmentController.php     # Sports-science assessments
 │   │   ├── StudioController.php         # Consent, check-ins, utilization reports
 │   │   ├── StudioClassController.php    # Class schedules
 │   │   ├── StudioBookingController.php  # Class bookings + waitlist
 │   │   ├── StudioMembershipController.php # Memberships
-│   │   └── RehabController.php          # PAR-Q, rehab tracks, PROMs, pain logs, SOAP notes
+│   │   ├── RehabController.php          # PAR-Q, rehab tracks, PROMs, pain logs, SOAP notes
+│   │   ├── ExerciseController.php       # WGER exercise library sync + search
+│   │   ├── ProgressPhotoController.php  # Client progress photos (front/side/back)
+│   │   ├── FoodDiaryController.php    # Client food diary entries
+│   │   ├── HabitController.php          # Habit tracking (coach assign + client log)
+│   │   ├── GoalController.php           # Goal setting with milestones
+│   │   ├── SessionPackageController.php # Session packages (coach sell + client use)
+│   │   └── PrRecordController.php       # Personal Record tracking (Epley 1RM)
 │   ├── Helpers/
 │   │   ├── Router.php            # Lightweight HTTP router
 │   │   ├── Request.php           # Body parsing, validation
@@ -196,9 +203,10 @@ backend/
 │       ├── ActivityLogService.php            # Staff action logging + client last_staff_id tracking
 │       ├── ConsentSigningService.php         # SHA-256 consent signature
 │       ├── NotificationService.php           # Legacy FCM wrapper (unused)
-│       ├── NotificationTriggerService.php    # Domain event → notifications + push
+│       ├── NotificationTriggerService.php    # Domain event → notifications + push (timezone-aware DND)
 │       ├── PushNotificationService.php       # Legacy Expo/FCM (unused)
 │       ├── ScheduledNotificationService.php    # Cron reminder runner
+│       ├── ExerciseLibraryService.php        # WGER exercise sync + search + image fetch
 │       └── MongoIndexes.php                  # Index definitions (run once after setup)
 ├── bootstrap/app.php             # CORS headers, error/exception handlers, router init
 ├── config/
@@ -286,6 +294,17 @@ php -r "define('BASE_PATH', getcwd()); require 'vendor/autoload.php'; Dotenv\Dot
   "lean_mass_kg": "number | null",
   "profile_photo_url": "string | null",
   "profile_photo_key": "string | null",
+  "profile_photo": "string | null",
+  "notification_settings": {
+    "email_sms": "boolean",
+    "appointments": "boolean",
+    "consultation": "boolean",
+    "test_result": "boolean",
+    "login_alerts": "boolean",
+    "dnd_enabled": "boolean",
+    "dnd_from": "string (HH:MM)",
+    "dnd_to": "string (HH:MM)"
+  },
   "login_code_hash": "string",
   "code_lookup": "string (SHA-256)",
   "token_version": "number",
@@ -349,6 +368,9 @@ Tokens are also set as httpOnly cookies (`access_token`, `refresh_token`).
 | `/coach/profile/photo`    | DELETE | Remove profile photo           |
 | `/coach/profile/password` | PUT    | Change password                |
 | `/coach/profile`          | DELETE | Delete own account             |
+| `/staff/profile`          | PUT    | Update staff name              |
+| `/staff/profile/photo`    | POST   | Upload / replace staff photo   |
+| `/staff/profile/photo`    | DELETE | Remove staff photo             |
 | `/coaches/registered`     | GET    | List all registered coaches    |
 
 ---
@@ -385,6 +407,21 @@ Tokens are also set as httpOnly cookies (`access_token`, `refresh_token`).
 | `/coach/clients/:id/workout-analyses/:analysisId/approve` | POST   | Approve analysis                    |
 | `/coach/clients/:id/workout-analyses/:analysisId/reject`  | POST   | Reject analysis                     |
 | `/coach/clients/:id/workout-analyses/:analysisId/assign`  | POST   | Assign to client                    |
+| `/coach/clients/:id/prs`                                | GET    | Client personal records               |
+| `/coach/clients/:id/prs/:exerciseId`                    | GET    | PR history per exercise               |
+| `/coach/clients/:id/food-diary`                         | GET    | Client food diary                     |
+| `/coach/clients/:id/habits`                             | GET    | Client habits                         |
+| `/coach/clients/:id/habits`                             | POST   | Create habit                          |
+| `/coach/clients/:id/habits/:habitId`                    | PUT    | Update habit                          |
+| `/coach/clients/:id/habits/:habitId`                    | DELETE | Delete habit                          |
+| `/coach/clients/:id/goals`                              | GET    | Client goals                          |
+| `/coach/clients/:id/goals`                              | POST   | Create goal                           |
+| `/coach/clients/:id/goals/:goalId`                      | PUT    | Update goal                           |
+| `/coach/clients/:id/goals/:goalId`                      | DELETE | Delete goal                           |
+| `/coach/clients/:id/session-packages`                   | GET    | Client session packages               |
+| `/coach/clients/:id/session-packages`                   | POST   | Create session package                |
+| `/coach/workout-logs/pending-review`                   | GET    | Workouts awaiting trainer review      |
+| `/coach/workout-logs/:id/review`                       | POST   | Review workout (approve / request redo) |
 
 ---
 
@@ -436,6 +473,19 @@ Fitbit flow:
 | `/workout-plans/:id/assign`   | POST   | Assign plan to one or more clients        |
 
 **Excel/CSV import required columns** (case-insensitive): `client_name`, `week_start`, `day`, `exercise`, `sets`, `reps`. Optional: `rest`, `notes`.
+
+---
+
+### Exercise Library
+
+WGER (wger.de) open-source exercise database integration. Exercises are cached locally in MongoDB after sync.
+
+| Endpoint                  | Method | Description                        |
+| ------------------------- | ------ | ---------------------------------- |
+| `/exercises`              | GET    | Search cached exercises            |
+| `/exercises/:id`          | GET    | Get single exercise                |
+| `/exercises/sync`         | POST   | Sync all exercises from WGER       |
+| `/exercises/:id/sync-images` | POST | Fetch images for an exercise      |
 
 ---
 
@@ -633,6 +683,23 @@ Fitbit flow:
 | `/client/notifications/unread-count`           | GET    | Unread count                       |
 | `/client/notifications/:id/read`               | POST   | Mark single as read                |
 | `/client/notifications/read-all`               | POST   | Mark all as read                   |
+| `/client/prs`                                  | GET    | List personal records              |
+| `/client/prs/:exerciseId`                      | GET    | PR history for exercise            |
+| `/client/prs`                                  | POST   | Record a new PR                    |
+| `/client/progress-photos`                      | GET    | List progress photos               |
+| `/client/progress-photos`                      | POST   | Upload progress photo              |
+| `/client/progress-photos/:photoId`             | DELETE | Delete progress photo              |
+| `/client/measurements`                       | POST   | Log body measurements              |
+| `/client/measurements`                        | GET    | List body measurements             |
+| `/client/workout-logs/:id/review`              | GET    | View trainer review of workout     |
+| `/client/habits`                               | GET    | List assigned habits               |
+| `/client/habits/:habitId/log`                  | POST   | Mark habit complete                |
+| `/client/habits/:habitId/log`                  | DELETE | Unmark habit complete              |
+| `/client/goals`                                | GET    | List goals                         |
+| `/client/food-diary`                           | GET    | List food diary entries            |
+| `/client/food-diary`                           | POST   | Log food entry                     |
+| `/client/food-diary/:entryId`                  | DELETE | Delete food entry                  |
+| `/client/session-packages`                     | GET    | List session packages              |
 
 ---
 
@@ -644,9 +711,16 @@ Fitbit flow:
 | `/org/staff/accept-invite`            | POST   | —      | Accept staff invite using token          |
 | `/org/staff`                          | GET    | Staff  | List organization staff                  |
 | `/org/staff/activities`               | GET    | Staff  | Recent staff activity (owner/admin only) |
+| `/org/staff/:id`                      | GET    | Staff  | Get staff member details                 |
+| `/org/staff/:id`                      | PUT    | Staff  | Update staff name/role (admin/owner)   |
 | `/org/staff/:id/role`                 | PATCH  | Staff  | Update staff role                        |
 | `/org/staff/:id/deactivate`           | POST   | Staff  | Deactivate staff + reassign clients      |
 | `/org/clients/:id/assignment`         | PATCH  | Staff  | Assign client to staff member            |
+| `/org/clients/:id/take-on`             | POST   | Staff  | Instructor self-assigns client           |
+| `/coach/clients/:id/prs`               | GET    | Staff  | Client PRs (coach view)                 |
+| `/coach/clients/:id/prs/:exerciseId`   | GET    | Staff  | Client PR history per exercise           |
+| `/coach/workout-logs/pending-review`    | GET    | Staff  | Workouts awaiting review                 |
+| `/coach/workout-logs/:id/review`        | POST   | Staff  | Review workout (approve/redo)            |
 | `/org/clients/:id/assessments`        | POST   | Staff  | Record assessment                        |
 | `/org/clients/:id/assessments`        | GET    | Staff  | List assessments                         |
 | `/org/clients/:id/assessments/latest` | GET    | Staff  | Latest assessment per type               |
@@ -778,9 +852,8 @@ This section documents bugs, gaps, and inconsistencies found during the codebase
     - The endpoint expects JSON but only looks at query or form-data for the media type.
     - **Fix:** Read `type` from `Request::body()`.
 
-14. **NotificationTriggerService cannot push to coaches.**
-    - `sendPushToCoach` looks for `coach['fcm_token']`, but coaches have no endpoint to register a token.
-    - **Fix:** Add coach FCM token endpoint or remove coach push logic.
+14. ~~**NotificationTriggerService cannot push to coaches.**~~ **Partially addressed.**
+    - `sendPushToCoach` now supports Do Not Disturb (DND) suppression based on `coach.notification_settings.dnd_enabled`, `dnd_from`, and `dnd_to`. Push notifications are suppressed during DND hours; in-app notifications are still stored. Coaches can set DND via `PUT /notification-settings`.
 
 15. **Unused route files and services.**
     - `routes/auth.php`, `routes/messages.php`, `routes/media.php`, `routes/analytics.php`, `routes/checkins.php`, `routes/coaches.php` are placeholders and not loaded.

@@ -22,7 +22,19 @@ class ClientController
         ], ['projection' => ['login_code_hash' => 0]]);
 
         if (!$client) Response::error('Client not found', 404);
-        Response::success($this->format($client));
+
+        $data = $this->format($client);
+
+        // Populate assigned coach name for client-facing display
+        if (!empty($client['primary_staff_id'])) {
+            $staff = Database::collection('staff')->findOne(['_id' => $client['primary_staff_id']]);
+            if ($staff) {
+                $data['assigned_coach_name'] = $staff['name'] ?? $staff['email'] ?? null;
+                $data['assigned_coach_id']   = (string) $staff['_id'];
+            }
+        }
+
+        Response::success($data);
     }
 
     // PUT /client/profile
@@ -419,13 +431,29 @@ class ClientController
         // coach_id as a defensive secondary filter on every cascade
         // row so a future refactor of findClient() cannot silently
         // widen the blast radius of a delete.
-        foreach (['workout_plans','workout_logs','body_measurements','media_uploads','messages','checkin_meetings','coaching_sessions','notifications'] as $coll) {
+        foreach ([
+            'workout_plans','workout_logs','body_measurements','media_uploads',
+            'messages','checkin_meetings','coaching_sessions','notifications',
+            'nutrition_plans','meal_logs','checkins','class_bookings',
+            'memberships','pain_logs','proms','soap_notes','rehab_tracks',
+            'wearable_data','wearable_sessions','wearable_tokens',
+            'wearable_connections','predictions','client_workout_analyses',
+            'parq_screenings','consent_documents','staff_activities',
+            'support_tickets','live_training_requests','message_typing_status',
+            'pr_records','progress_photos',
+        ] as $coll) {
             $filter = ['client_id' => $clientId];
             if ($coachId !== null) {
                 $filter['coach_id'] = $coachId;
             }
             Database::collection($coll)->deleteMany($filter);
         }
+
+        // Refresh tokens use user_id instead of client_id
+        Database::collection('refresh_tokens')->deleteMany([
+            'user_id' => $clientId,
+            'role'    => 'client',
+        ]);
 
         ScopedCollection::for('clients')->deleteOne(['_id' => $clientId]);
 

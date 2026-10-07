@@ -295,8 +295,9 @@ class WorkoutAnalysisController
 
         // Notify client
         try {
+            $planTitle = $body['plan_title'] ?? ($plan['title'] ?? ($planData['title'] ?? 'Your new plan'));
             $this->notifications->notifyClientNewPlan(
-                $body['plan_title'] ?? ($plan['title'] ?? 'Your new plan'),
+                $planTitle,
                 $planId,
                 $clientId
             );

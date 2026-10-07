@@ -22,12 +22,12 @@ class SubscriptionController
      */
     public function status(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
 
         if (!$coach) Response::error('Coach not found', 404);
 
-        $tier   = $coach['subscription_tier'] ?? 'free';
+        $tier   = $coach['subscription_tier'] ?? 'none';
         $status = $coach['subscription_status'] ?? 'none';
         $limit  = self::TIER_LIMITS[$tier] ?? self::TIER_LIMITS['free'];
 
@@ -48,12 +48,24 @@ class SubscriptionController
         };
 
         $trialStartsAt = $formatDate($coach['trial_starts_at'] ?? null);
-        $trialEndsAt = $formatDate($coach['trial_ends_at'] ?? null);
-        $periodEnd = $formatDate($coach['subscription_period_end'] ?? null);
+        $trialEndsAt   = $formatDate($coach['trial_ends_at']   ?? null);
+        $periodEnd     = $formatDate($coach['subscription_period_end'] ?? null);
+
+        // If subscription_period_end is missing but trial_ends_at exists, use trial end
+        // as the period end (they represent the same moment for trial subscriptions).
+        if (!$periodEnd && $trialEndsAt) {
+            $periodEnd = $trialEndsAt;
+        }
+
         $amountCents = $coach['subscription_price_cents'] ?? null;
         $amount = is_numeric($amountCents) ? round(((int) $amountCents) / 100, 2) : null;
         $currency = $coach['subscription_currency'] ?? null;
         $providerAvailable = StripeService::isConfigured();
+
+        // next_payment_date only makes sense for active or trialing subscriptions.
+        $nextPaymentDate = in_array($status, ['active', 'trialing'], true)
+            ? $periodEnd
+            : null;
 
         Response::success([
             'tier'                   => $tier,
@@ -64,7 +76,7 @@ class SubscriptionController
             'trial_starts_at'        => $trialStartsAt,
             'trial_ends_at'          => $trialEndsAt,
             'current_period_end'     => $periodEnd,
-            'next_payment_date'      => $periodEnd,
+            'next_payment_date'      => $nextPaymentDate,
             'amount'                 => $amount,
             'currency'               => $currency,
             'provider_available'     => $providerAvailable,
@@ -78,7 +90,7 @@ class SubscriptionController
      */
     public function billingInformation(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
@@ -103,7 +115,7 @@ class SubscriptionController
      */
     public function updateBillingInformation(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
@@ -165,7 +177,7 @@ class SubscriptionController
      */
     public function setupTrial(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, ['plan_tier' => 'required']);
         if ($errors) Response::error('Validation failed', 422, $errors);
@@ -230,7 +242,7 @@ class SubscriptionController
      */
     public function confirmTrial(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, ['payment_method_id' => 'required']);
         if ($errors) Response::error('Validation failed', 422, $errors);
@@ -339,7 +351,7 @@ class SubscriptionController
      */
     public function selectPlan(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, ['plan_tier' => 'required']);
         if ($errors) Response::error('Validation failed', 422, $errors);
@@ -467,7 +479,7 @@ class SubscriptionController
      */
     public function checkout(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, ['tier' => 'required']);
         if ($errors) Response::error('Validation failed', 422, $errors);
@@ -532,7 +544,7 @@ class SubscriptionController
      */
     public function portal(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
@@ -557,7 +569,7 @@ class SubscriptionController
      */
     public function cancel(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
@@ -857,7 +869,7 @@ class SubscriptionController
      */
     public function invoices(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
@@ -880,9 +892,16 @@ class SubscriptionController
                 $amountCents = $inv['amount_paid'] ?? ($inv['amount_due'] ?? 0);
                 $created = $inv['created'] ?? null;
 
+                // Stripe sometimes returns null for number on draft/pending invoices.
+                // Fallback to a readable generated number so the UI never shows blank.
+                $number = $inv['number'] ?? null;
+                if (empty($number)) {
+                    $number = '#' . strtoupper(substr($inv['id'], -8));
+                }
+
                 return [
                     'id'                 => $inv['id'],
-                    'number'             => $inv['number'] ?? null,
+                    'number'             => $number,
                     'amount'             => $amountCents > 0 ? round($amountCents / 100, 2) : 0,
                     'currency'           => $inv['currency'] ?? 'usd',
                     'status'             => $inv['status'] ?? 'unknown',
@@ -911,7 +930,7 @@ class SubscriptionController
      */
     public function downloadInvoice(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach   = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
@@ -947,7 +966,7 @@ class SubscriptionController
      */
     public function upgrade(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, ['tier' => 'required']);
         if ($errors) Response::error('Validation failed', 422, $errors);
@@ -1004,7 +1023,7 @@ class SubscriptionController
      */
     public function listPaymentMethods(array $params): void
     {
-        $coachId    = new ObjectId($params['_auth']['sub']);
+        $coachId    = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach      = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
@@ -1045,7 +1064,7 @@ class SubscriptionController
      */
     public function createSetupIntent(array $params): void
     {
-        $coachId    = new ObjectId($params['_auth']['sub']);
+        $coachId    = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach      = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
@@ -1080,7 +1099,7 @@ class SubscriptionController
      */
     public function addPaymentMethod(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, ['payment_method_id' => 'required']);
         if ($errors) Response::error('Validation failed', 422, $errors);
@@ -1119,7 +1138,7 @@ class SubscriptionController
      */
     public function deletePaymentMethod(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $pmId    = $params['id'] ?? '';
 
         if (empty($pmId)) Response::error('Payment method ID required', 400);
@@ -1151,7 +1170,7 @@ class SubscriptionController
      */
     public function setDefaultPaymentMethod(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $pmId    = $params['id'] ?? '';
 
         if (empty($pmId)) Response::error('Payment method ID required', 400);

@@ -42,6 +42,7 @@ class MongoIndexes
             ['key' => ['email' => 1]],
             ['key' => ['phone' => 1]],
             ['key' => ['login_code_hash' => 1]],
+            ['key' => ['code_lookup' => 1], 'unique' => true, 'sparse' => true],
         ]);
 
         // workout_plans
@@ -54,6 +55,7 @@ class MongoIndexes
         $db->getCollection('workout_logs')->createIndexes([
             ['key' => ['client_id' => 1, 'completed_at' => -1]],
             ['key' => ['client_id' => 1, 'workout_plan_id' => 1, 'day' => 1], 'unique' => true],
+            ['key' => ['client_id' => 1, 'review_status' => 1]],
         ]);
 
         // nutrition_plans
@@ -67,6 +69,50 @@ class MongoIndexes
             ['key' => ['coach_id' => 1]],
             ['key' => ['source' => 1, 'fdc_id' => 1], 'unique' => true, 'sparse' => true],
             ['key' => ['stale_at' => 1, 'refresh_status' => 1]],
+        ]);
+
+        // exercises (cached WGER exercise library)
+        $db->getCollection('exercises')->createIndexes([
+            ['key' => ['external_id' => 1], 'unique' => true],
+            ['key' => ['name' => 'text']],
+            ['key' => ['category' => 1]],
+            ['key' => ['muscles' => 1]],
+            ['key' => ['updated_at' => 1]],
+        ]);
+
+        // progress_photos
+        $db->getCollection('progress_photos')->createIndexes([
+            ['key' => ['client_id' => 1, 'taken_at' => -1]],
+            ['key' => ['client_id' => 1, 'type' => 1]],
+            ['key' => ['client_id' => 1, 'label' => 1]],
+        ]);
+
+        // food_diary_entries
+        $db->getCollection('food_diary_entries')->createIndexes([
+            ['key' => ['client_id' => 1, 'logged_at' => -1]],
+            ['key' => ['client_id' => 1, 'food_name' => 'text']],
+        ]);
+
+        // habits
+        $db->getCollection('habits')->createIndexes([
+            ['key' => ['client_id' => 1, 'created_at' => -1]],
+        ]);
+
+        // habit_logs
+        $db->getCollection('habit_logs')->createIndexes([
+            ['key' => ['habit_id' => 1, 'client_id' => 1, 'date' => -1], 'unique' => true],
+        ]);
+
+        // goals
+        $db->getCollection('goals')->createIndexes([
+            ['key' => ['client_id' => 1, 'status' => 1]],
+            ['key' => ['client_id' => 1, 'created_at' => -1]],
+        ]);
+
+        // session_packages
+        $db->getCollection('session_packages')->createIndexes([
+            ['key' => ['client_id' => 1, 'status' => 1]],
+            ['key' => ['client_id' => 1, 'created_at' => -1]],
         ]);
 
         // cache_refresh_jobs (nutrition cache background refresh queue)
@@ -172,6 +218,13 @@ class MongoIndexes
         // rate_limits
         $db->getCollection('rate_limits')->createIndexes([
             ['key' => ['expires_at' => 1], 'expireAfterSeconds' => 0],
+        ]);
+
+        // team_meetings (admin-staff scheduling)
+        $db->getCollection('team_meetings')->createIndexes([
+            ['key' => ['org_id' => 1, 'scheduled_at' => 1]],
+            ['key' => ['participant_ids' => 1, 'scheduled_at' => 1]],
+            ['key' => ['org_id' => 1, 'status' => 1]],
         ]);
 
         echo "All indexes created successfully.\n";

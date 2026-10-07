@@ -23,14 +23,15 @@ class AuthController
 
     private function setTokenCookies(string $accessToken, string $refreshToken): void
     {
-        $secure = $this->isSecure();
+        $secure   = $this->isSecure();
+        $sameSite = ($_ENV['APP_ENV'] ?? '') === 'production' ? 'Strict' : 'Lax';
 
         setcookie('access_token', $accessToken, [
             'expires'  => time() + 900,       // 15 min
             'path'     => '/',
             'secure'   => $secure,
             'httponly'  => true,
-            'samesite' => 'Strict',
+            'samesite' => $sameSite,
         ]);
 
         setcookie('refresh_token', $refreshToken, [
@@ -38,7 +39,7 @@ class AuthController
             'path'     => '/',
             'secure'   => $secure,
             'httponly'  => true,
-            'samesite' => 'Strict',
+            'samesite' => $sameSite,
         ]);
     }
 
@@ -386,14 +387,15 @@ class AuthController
         $errors = Request::validate($body, ['email' => 'required|email', 'password' => 'required']);
         if ($errors) Response::error('Validation failed', 422, $errors);
 
-        $staff = Database::collection('staff')->findOne(['email' => strtolower($body['email'])]);
+        $email = strtolower(trim($body['email'] ?? ''));
+        $staff = Database::collection('staff')->findOne(['email' => $email]);
         if (!$staff) {
-            error_log("[STAFF LOGIN] Failed login for unknown email: " . ($body['email'] ?? 'empty'));
             Response::error('Invalid credentials', 401);
         }
 
         $status = $staff['status'] ?? '';
-        $setupComplete = true;
+        // Profile is complete only when a name has been set.
+        $setupComplete = !empty($staff['name']) && strlen(trim($staff['name'])) >= 2;
 
         // Invited staff may finish onboarding by logging in. If they have not
         // set a password yet, the password they supply now becomes their password.
@@ -413,7 +415,6 @@ class AuthController
                     ]]
                 );
                 $staff['password_hash'] = $passwordHash;
-                $setupComplete = !empty($staff['name']) && strlen(trim($staff['name'])) >= 2;
             } elseif (password_verify($body['password'], $staff['password_hash'])) {
                 // Invite was already accepted via another path but status is still invited.
                 Database::collection('staff')->updateOne(
@@ -425,19 +426,16 @@ class AuthController
                     ]]
                 );
             } else {
-                error_log("[STAFF LOGIN] Failed login for invited staff: " . ($body['email'] ?? 'empty'));
                 Response::error('Invalid credentials', 401);
             }
             $status = 'active';
         }
 
         if (empty($staff['password_hash']) || !password_verify($body['password'], $staff['password_hash'])) {
-            error_log("[STAFF LOGIN] Failed login for email: " . ($body['email'] ?? 'empty'));
             Response::error('Invalid credentials', 401);
         }
 
         if ($status !== 'active') {
-            error_log("[STAFF LOGIN] Blocked login for inactive staff: " . ($body['email'] ?? 'empty') . " status=" . $status);
             Response::error('Staff account is not active', 403);
         }
 
@@ -557,6 +555,9 @@ class AuthController
                 $decoded['org_id']     = (string) $staff['org_id'];
                 $decoded['staff_role'] = $staff['role'];
             }
+
+            // Revoke the consumed refresh token to prevent concurrent reuse
+            $this->revokeRefreshToken($token);
 
             $payload = [
                 'sub'           => $decoded['sub'],

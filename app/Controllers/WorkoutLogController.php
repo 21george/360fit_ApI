@@ -577,4 +577,130 @@ class WorkoutLogController
             ],
         ]);
     }
+
+    // ─── Trainer Review Workflow ──────────────────────────────────────────────
+
+    /**
+     * GET /coach/workout-logs/pending-review
+     *
+     * Returns workout logs awaiting trainer review.
+     */
+    public function pendingReview(array $params): void
+    {
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
+
+        // Find all clients belonging to this coach
+        $clients = Database::collection('clients')->find(
+            ['coach_id' => $coachId],
+            ['projection' => ['_id' => 1, 'name' => 1, 'profile_photo_url' => 1]]
+        )->toArray();
+
+        $clientIds = array_map(fn($c) => $c['_id'], $clients);
+        $clientMap = [];
+        foreach ($clients as $c) {
+            $clientMap[(string) $c['_id']] = [
+                'name'  => $c['name'] ?? 'Unknown',
+                'photo' => $c['profile_photo_url'] ?? null,
+            ];
+        }
+
+        // Find logs that don't have review_status or have review_status = 'pending'
+        $logs = Database::collection('workout_logs')
+            ->find(
+                [
+                    'client_id' => ['$in' => $clientIds],
+                    '$or' => [
+                        ['review_status' => ['$exists' => false]],
+                        ['review_status' => 'pending'],
+                    ],
+                ],
+                ['sort' => ['completed_at' => -1], 'limit' => 50]
+            )
+            ->toArray();
+
+        $result = array_map(function ($log) use ($clientMap) {
+            $clientId = (string) $log['client_id'];
+            return [
+                'id'           => (string) $log['_id'],
+                'client'       => $clientMap[$clientId] ?? ['name' => 'Unknown', 'photo' => null],
+                'day'          => $log['day'] ?? '',
+                'exercises'    => $log['exercises'] ?? [],
+                'notes'        => $log['notes'] ?? null,
+                'completed_at' => (string) ($log['completed_at'] ?? ''),
+                'review_status' => $log['review_status'] ?? 'pending',
+            ];
+        }, $logs);
+
+        Response::success([
+            'logs'  => $result,
+            'count' => count($result),
+        ]);
+    }
+
+    /**
+     * POST /coach/workout-logs/:id/review
+     *
+     * Trainer reviews a workout log.
+     * Body: { status: 'approved'|'needs_redo', feedback?: string }
+     */
+    public function reviewLog(array $params): void
+    {
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
+        $logId   = new ObjectId($params['id']);
+
+        $log = Database::collection('workout_logs')->findOne(['_id' => $logId]);
+        if (!$log) Response::error('Log not found', 404);
+
+        // Verify the log belongs to a client of this coach
+        $client = Database::collection('clients')->findOne([
+            '_id'      => $log['client_id'],
+            'coach_id' => $coachId,
+        ]);
+        if (!$client) Response::error('Unauthorized', 403);
+
+        $body = Request::body();
+        $status = strtolower(trim((string) ($body['status'] ?? '')));
+        if (!in_array($status, ['approved', 'needs_redo'], true)) {
+            Response::error("Invalid status. Use 'approved' or 'needs_redo'", 422);
+        }
+
+        Database::collection('workout_logs')->updateOne(
+            ['_id' => $logId],
+            ['$set' => [
+                'review_status'   => $status,
+                'review_feedback' => $body['feedback'] ?? null,
+                'reviewed_at'     => new \MongoDB\BSON\UTCDateTime(),
+                'reviewed_by'     => $coachId,
+            ]]
+        );
+
+        Response::success([
+            'id'       => (string) $logId,
+            'status'   => $status,
+            'feedback' => $body['feedback'] ?? null,
+        ], 'Review saved');
+    }
+
+    /**
+     * GET /client/workout-logs/:id/review
+     *
+     * Client view of their workout review.
+     */
+    public function clientReview(array $params): void
+    {
+        $clientId = new ObjectId($params['_auth']['sub']);
+        $logId    = new ObjectId($params['id']);
+
+        $log = Database::collection('workout_logs')->findOne([
+            '_id'       => $logId,
+            'client_id' => $clientId,
+        ]);
+        if (!$log) Response::error('Log not found', 404);
+
+        Response::success([
+            'review_status'   => $log['review_status'] ?? 'pending',
+            'review_feedback' => $log['review_feedback'] ?? null,
+            'reviewed_at'     => isset($log['reviewed_at']) ? (string) $log['reviewed_at'] : null,
+        ]);
+    }
 }

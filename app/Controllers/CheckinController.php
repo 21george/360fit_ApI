@@ -27,6 +27,117 @@ class CheckinController
         Response::success(array_map(fn($m) => $this->format($m), $meetings));
     }
 
+    // POST /client/checkins/request
+    public function clientRequest(array $params): void
+    {
+        $clientId = new ObjectId($params['_auth']['sub']);
+        $body = Request::body();
+        $errors = Request::validate($body, [
+            'scheduled_at' => 'required',
+            'type'         => 'required',
+        ]);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        // Look up client's coach
+        $client = Database::collection('clients')->findOne(['_id' => $clientId]);
+        if (!$client) Response::error('Client not found', 404);
+
+        $coachId = $client['coach_id'] ?? null;
+        if (!$coachId) Response::error('No coach assigned', 400);
+
+        if (!in_array($body['type'], ['call', 'video', 'chat'], true)) {
+            Response::error('Validation failed', 422, ['type' => ['Must be call, video, or chat']]);
+        }
+
+        // RLS: auto-sets coach_id for coach role (bypassed via Database::collection here)
+        $result = Database::collection('checkin_meetings')->insertOne([
+            'coach_id'     => $coachId instanceof ObjectId ? $coachId : new ObjectId((string) $coachId),
+            'client_id'    => $clientId,
+            'scheduled_at' => new UTCDateTime(strtotime($body['scheduled_at']) * 1000),
+            'type'         => $body['type'],
+            'meeting_link' => null,
+            'notes'        => $body['notes'] ?? null,
+            'status'       => 'scheduled',
+            'source'       => 'client',
+            'client_response' => 'accepted',
+            'client_response_note' => null,
+            'client_responded_at' => new UTCDateTime(),
+            'proposed_scheduled_at' => null,
+            'created_at'   => new UTCDateTime(),
+            'updated_at'   => new UTCDateTime(),
+        ]);
+
+        // Notify coach
+        $triggerService = new NotificationTriggerService();
+        try {
+            $triggerService->notifyClientMeetingRequest(
+                (string) $coachId,
+                (string) $clientId,
+                $client['name'] ?? 'A client',
+                (string) $result->getInsertedId(),
+                $body['scheduled_at'],
+                $body['type']
+            );
+        } catch (\Throwable $e) {
+            error_log('Failed to send client meeting request notification: ' . $e->getMessage());
+        }
+
+        Response::success(['id' => (string) $result->getInsertedId()], 'Meeting request sent', 201);
+    }
+
+    // POST /checkins/:id/client-request-action
+    public function clientRequestAction(array $params): void
+    {
+        $meetingId = new ObjectId($params['id']);
+        $body = Request::body();
+        $errors = Request::validate($body, ['action' => 'required']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        $action = strtolower(trim((string) $body['action']));
+        if (!in_array($action, ['approve', 'decline'], true)) {
+            Response::error('Invalid action. Use approve or decline', 422);
+        }
+
+        // RLS: coach/staff role scopes by coach_id
+        $meeting = ScopedCollection::for('checkin_meetings')->findOne([
+            '_id' => $meetingId,
+            'source' => 'client',
+            'status' => 'scheduled',
+        ]);
+        if (!$meeting) Response::error('No pending client meeting request found', 404);
+
+        $update = [
+            'updated_at' => new UTCDateTime(),
+        ];
+
+        if ($action === 'approve') {
+            $update['source'] = 'coach';
+        } else {
+            $update['status'] = 'cancelled';
+        }
+
+        ScopedCollection::for('checkin_meetings')->updateOne(['_id' => $meetingId], ['$set' => $update]);
+
+        // Notify client
+        $clientId = (string) $meeting['client_id'];
+        $scheduledAt = isset($meeting['scheduled_at'])
+            ? date('c', (int) (((string) $meeting['scheduled_at']) / 1000))
+            : '';
+
+        $triggerService = new NotificationTriggerService();
+        try {
+            if ($action === 'approve') {
+                $triggerService->notifyClientMeetingApproved($clientId, (string) $meetingId, $scheduledAt);
+            } else {
+                $triggerService->notifyClientMeetingDeclined($clientId, (string) $meetingId, $scheduledAt);
+            }
+        } catch (\Throwable $e) {
+            error_log('Failed to send meeting request status notification: ' . $e->getMessage());
+        }
+
+        Response::success(null, $action === 'approve' ? 'Meeting request approved' : 'Meeting request declined');
+    }
+
     // POST /checkins
     public function store(array $params): void
     {
@@ -296,6 +407,53 @@ class CheckinController
         Response::success($this->format($updatedMeeting), 'Reschedule requested');
     }
 
+    // POST /checkins/:id/reschedule-action
+    // Coach approves or declines a client's reschedule request.
+    public function rescheduleAction(array $params): void
+    {
+        $meetingId = new ObjectId($params['id']);
+        $body      = Request::body();
+        $errors    = Request::validate($body, ['action' => 'required']);
+        if ($errors) Response::error('Validation failed', 422, $errors);
+
+        $action = strtolower(trim((string) $body['action']));
+        if (!in_array($action, ['approve', 'decline'], true)) {
+            Response::error('Invalid action. Use approve or decline', 422);
+        }
+
+        $meeting = ScopedCollection::for('checkin_meetings')->findOne([
+            '_id' => $meetingId,
+            'client_response' => 'reschedule_requested',
+        ]);
+        if (!$meeting) Response::error('No reschedule request found for this check-in', 404);
+
+        $update = [
+            'client_response'    => $action === 'approve' ? 'accepted' : 'declined',
+            'coach_responded_at' => new UTCDateTime(),
+            'updated_at'         => new UTCDateTime(),
+        ];
+
+        if ($action === 'approve') {
+            $update['status'] = 'scheduled';
+            if (!empty($body['new_scheduled_at'])) {
+                $timestamp = strtotime($body['new_scheduled_at']);
+                if ($timestamp !== false) {
+                    $update['scheduled_at'] = new UTCDateTime($timestamp * 1000);
+                }
+            }
+        }
+
+        ScopedCollection::for('checkin_meetings')->updateOne(
+            ['_id' => $meetingId],
+            ['$set' => $update]
+        );
+
+        $updatedMeeting = ScopedCollection::for('checkin_meetings')->findOne(['_id' => $meetingId]);
+        if (!$updatedMeeting) Response::error('Meeting not found', 404);
+
+        Response::success($this->format($updatedMeeting), $action === 'approve' ? 'Reschedule approved' : 'Reschedule declined');
+    }
+
     private function formatNullableDate(mixed $value): ?string
     {
         if (!$value) return null;
@@ -326,6 +484,7 @@ class CheckinController
             'meeting_link' => $data['meeting_link'] ?? null,
             'notes'        => $data['notes'] ?? null,
             'status'       => $data['status'] ?? 'scheduled',
+            'source'       => $data['source'] ?? 'coach',
             'client_response' => in_array($clientResponse, self::CLIENT_RESPONSES, true)
                 ? $clientResponse
                 : 'pending',

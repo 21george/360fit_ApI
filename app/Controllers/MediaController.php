@@ -54,7 +54,8 @@ class MediaController
         }
 
         $file = $_FILES['file'];
-        $type = $_GET['type'] ?? $_POST['type'] ?? 'photo';
+        $body = Request::body();
+        $type = $_GET['type'] ?? $_POST['type'] ?? ($body['type'] ?? 'photo');
         // Prevent path traversal: whitelist and sanitize the type parameter
         if (!is_string($type) || !in_array($type, self::ALLOWED_UPLOAD_TYPES, true)) {
             Response::error('Invalid upload type', 422);
@@ -204,5 +205,72 @@ class MediaController
         ]);
 
         Response::success(['id' => (string) $result->getInsertedId()], 'Measurement recorded', 201);
+    }
+
+    // POST /client/measurements
+    public function storeClientMeasurement(array $params): void
+    {
+        $clientId = new ObjectId($params['_auth']['sub']);
+        $client   = Database::collection('clients')->findOne(['_id' => $clientId]);
+        if (!$client) Response::error('Client not found', 404);
+
+        $body    = Request::body();
+
+        $weightKg = (float) ($body['weight_kg'] ?? 0);
+        if ($weightKg <= 0 || $weightKg > 300) {
+            Response::error('weight_kg must be between 0.1 and 300 kg', 422);
+        }
+
+        $bodyFat = (float) ($body['body_fat_pct'] ?? 0);
+        if ($bodyFat < 0 || $bodyFat > 70) {
+            Response::error('body_fat_pct must be between 0 and 70%', 422);
+        }
+
+        foreach (['chest_cm', 'waist_cm', 'hips_cm', 'arms_cm', 'legs_cm'] as $field) {
+            $val = (float) ($body[$field] ?? 0);
+            if ($val < 0 || $val > 250) {
+                Response::error("{$field} must be between 0 and 250 cm", 422);
+            }
+        }
+
+        $result  = Database::collection('body_measurements')->insertOne([
+            'client_id'    => $clientId,
+            'coach_id'     => $client['coach_id'] ?? null,
+            'weight_kg'    => $weightKg,
+            'chest_cm'     => (float) ($body['chest_cm'] ?? 0),
+            'waist_cm'     => (float) ($body['waist_cm'] ?? 0),
+            'hips_cm'      => (float) ($body['hips_cm'] ?? 0),
+            'arms_cm'      => (float) ($body['arms_cm'] ?? 0),
+            'legs_cm'      => (float) ($body['legs_cm'] ?? 0),
+            'body_fat_pct' => $bodyFat,
+            'notes'        => $body['notes'] ?? null,
+            'recorded_at'  => new \MongoDB\BSON\UTCDateTime(),
+        ]);
+
+        Response::success(['id' => (string) $result->getInsertedId()], 'Measurement recorded', 201);
+    }
+
+    // GET /client/measurements
+    public function clientMeasurements(array $params): void
+    {
+        $clientId = new ObjectId($params['_auth']['sub']);
+        $docs = Database::collection('body_measurements')
+            ->find(['client_id' => $clientId], ['sort' => ['recorded_at' => -1]])
+            ->toArray();
+
+        $result = array_map(fn($m) => [
+            'id'           => (string) $m['_id'],
+            'weight_kg'    => (float) ($m['weight_kg'] ?? 0),
+            'chest_cm'     => (float) ($m['chest_cm'] ?? 0),
+            'waist_cm'     => (float) ($m['waist_cm'] ?? 0),
+            'hips_cm'      => (float) ($m['hips_cm'] ?? 0),
+            'arms_cm'      => (float) ($m['arms_cm'] ?? 0),
+            'legs_cm'      => (float) ($m['legs_cm'] ?? 0),
+            'body_fat_pct' => (float) ($m['body_fat_pct'] ?? 0),
+            'notes'        => $m['notes'] ?? null,
+            'recorded_at'  => $m['recorded_at'] ? date('c', (int)(((string)$m['recorded_at']) / 1000)) : null,
+        ], $docs);
+
+        Response::success($result);
     }
 }

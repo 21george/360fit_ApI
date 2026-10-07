@@ -28,7 +28,7 @@ class StudioController
         $client   = Database::collection('clients')->findOne(['_id' => $clientId]);
         if (!$client) Response::notFound('Client not found');
 
-        $this->signConsent($client['coach_id'], $clientId, Request::body(), (string) $clientId);
+        $this->signConsent(new ObjectId((string) $client['coach_id']), $clientId, Request::body(), (string) $clientId);
     }
 
     private function signConsent(ObjectId $orgId, ObjectId $clientId, array $body, string $signerId): void
@@ -76,7 +76,7 @@ class StudioController
         $client   = Database::collection('clients')->findOne(['_id' => $clientId]);
         if (!$client) Response::notFound('Client not found');
 
-        $this->checkin($client['coach_id'], $clientId, 'self');
+        $this->checkin(new ObjectId((string) $client['coach_id']), $clientId, 'self');
     }
 
     private function checkin(ObjectId $orgId, ObjectId $clientId, string $method): void

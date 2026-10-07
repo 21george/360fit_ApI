@@ -15,7 +15,7 @@ class SettingsController
     // GET /integrations/settings
     public function getIntegrations(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach   = Database::collection('coaches')->findOne(
             ['_id' => $coachId],
             ['projection' => ['integrations' => 1]]
@@ -32,7 +32,7 @@ class SettingsController
     // PUT /integrations/settings
     public function updateIntegrations(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
 
         $set = ['updated_at' => new \MongoDB\BSON\UTCDateTime()];
@@ -71,7 +71,7 @@ class SettingsController
     // GET /notification-settings
     public function getNotificationSettings(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $coach   = Database::collection('coaches')->findOne(
             ['_id' => $coachId],
             ['projection' => ['notification_settings' => 1]]
@@ -96,7 +96,7 @@ class SettingsController
     // PUT /notification-settings
     public function updateNotificationSettings(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
 
         $allowed = ['email_sms', 'appointments', 'consultation', 'test_result', 'login_alerts', 'dnd_enabled', 'dnd_from', 'dnd_to'];
@@ -133,7 +133,7 @@ class SettingsController
     // POST /support/contact
     public function createSupportTicket(array $params): void
     {
-        $coachId = new ObjectId($params['_auth']['sub']);
+        $coachId = new ObjectId($params['_org_id'] ?? $params['_auth']['sub']);
         $body    = Request::body();
         $errors  = Request::validate($body, [
             'subject' => 'required',
