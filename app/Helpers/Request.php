@@ -9,11 +9,7 @@ class Request
     {
         $raw = file_get_contents('php://input');
         if (empty($raw)) return [];
-        try {
-            return json_decode($raw, true, 512, JSON_THROW_ON_ERROR) ?? [];
-        } catch (\JsonException) {
-            return [];
-        }
+        return json_decode($raw, true, 512, JSON_THROW_ON_ERROR) ?? [];
     }
 
     public static function get(string $key, mixed $default = null): mixed

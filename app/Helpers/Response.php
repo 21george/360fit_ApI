@@ -6,9 +6,19 @@ namespace App\Helpers;
 
 class Response
 {
+    private static ?string $requestId = null;
+
+    public static function setRequestId(string $id): void
+    {
+        self::$requestId = $id;
+    }
+
     public static function json(mixed $data, int $code = 200): never
     {
         http_response_code($code);
+        if (self::$requestId !== null) {
+            header('X-Request-ID: ' . self::$requestId);
+        }
         echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
         exit;
     }

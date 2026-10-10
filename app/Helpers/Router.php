@@ -79,13 +79,18 @@ class Router
             }
         }
 
-        foreach ($this->routes as [$routeMethod, $routePath, $handler, $middleware]) {
-            if ($method !== $routeMethod) continue;
+        $allowedMethods = [];
 
+        foreach ($this->routes as [$routeMethod, $routePath, $handler, $middleware]) {
             $pattern = preg_replace('#/:([^/]+)#', '/(?P<$1>[^/]+)', $routePath);
             $pattern = '#^' . $pattern . '$#';
 
-            if (preg_match($pattern, $uri, $matches)) {
+            if (!preg_match($pattern, $uri)) {
+                continue;
+            }
+
+            if ($method === $routeMethod) {
+                preg_match($pattern, $uri, $matches);
                 $params = array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY);
 
                 // Run middleware chain
@@ -104,6 +109,13 @@ class Router
                 }
                 return;
             }
+
+            $allowedMethods[] = $routeMethod;
+        }
+
+        if ($allowedMethods !== []) {
+            header('Allow: ' . implode(', ', array_unique($allowedMethods)));
+            Response::json(['error' => 'Method not allowed'], 405);
         }
 
         Response::json(['error' => 'Route not found'], 404);

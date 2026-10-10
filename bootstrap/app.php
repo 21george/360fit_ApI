@@ -55,14 +55,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
+// Request correlation ID for tracing errors across logs and client reports
+$requestId = $_SERVER['HTTP_X_REQUEST_ID'] ?? bin2hex(random_bytes(8));
+Response::setRequestId($requestId);
+
 // Error handler
 set_error_handler(function ($severity, $message, $file, $line) {
     throw new ErrorException($message, 0, $severity, $file, $line);
 });
 
-set_exception_handler(function (Throwable $e) {
+set_exception_handler(function (Throwable $e) use ($requestId) {
     $errorMsg = sprintf(
-        "%s [%s:%d] %s",
+        "[%s] %s [%s:%d] %s",
+        $requestId,
         get_class($e),
         $e->getFile(),
         $e->getLine(),
@@ -97,6 +102,15 @@ set_exception_handler(function (Throwable $e) {
         || ($e instanceof \UnexpectedValueException && str_contains($e->getMessage(), 'ObjectId'))
     ) {
         Response::json(['error' => 'Invalid request: ' . $e->getMessage()], 400);
+    }
+
+    // Transient MongoDB issues (connection loss, timeouts, etc.) should
+    // be surfaced as 503 so callers know to retry.
+    if ($e instanceof \MongoDB\Driver\Exception\RuntimeException
+        || $e instanceof \MongoDB\Driver\Exception\ConnectionTimeoutException
+        || $e instanceof \MongoDB\Driver\Exception\ExecutionTimeoutException
+    ) {
+        Response::json(['error' => 'Service temporarily unavailable'], 503);
     }
 
     Response::json(['error' => 'Internal server error'], 500);

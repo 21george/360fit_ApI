@@ -654,6 +654,10 @@ class SubscriptionController
             case 'invoice.payment_failed':
                 $this->handlePaymentFailed($data);
                 break;
+
+            default:
+                error_log("[webhook] Unhandled Stripe event type: {$type}");
+                break;
         }
 
         Response::success(null, 'Webhook processed');
