@@ -93,9 +93,14 @@ class Router
                 preg_match($pattern, $uri, $matches);
                 $params = array_filter($matches, 'is_string', ARRAY_FILTER_USE_KEY);
 
-                // Run middleware chain
+                // Run middleware chain.
+                // Each entry may be either:
+                //   - a class string (instantiated with `new $mw()`), or
+                //   - a pre-instantiated middleware instance (used as-is),
+                //     which is how parameterized middleware such as
+                //     RoleGateMiddleware(['owner','admin']) is registered.
                 foreach ($middleware as $mw) {
-                    $mwInstance = new $mw();
+                    $mwInstance = is_object($mw) ? $mw : new $mw();
                     $mwInstance->handle($params);
                 }
 

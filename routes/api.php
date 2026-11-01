@@ -40,7 +40,7 @@ use App\Controllers\{
     TeamMeetingController,
     DashboardController
 };
-use App\Middleware\{CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SubscriptionMiddleware, SetupAuthMiddleware, StaffMiddleware};
+use App\Middleware\{CoachMiddleware, ClientMiddleware, AuthRateLimitMiddleware, SubscriptionMiddleware, SetupAuthMiddleware, StaffMiddleware, RoleGateMiddleware};
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 $router->get('/health', function () {
@@ -309,6 +309,7 @@ $router->get('/coach/clients/:id/adherence', [MealLogController::class, 'adheren
 
 // ─── Client: Wearable ─────────────────────────────────────────────────────────
 $router->post('/client/wearable/data',           [WearableController::class, 'pushData'],      [ClientMiddleware::class]);
+$router->get('/client/wearable/data',            [WearableController::class, 'clientSelfData'], [ClientMiddleware::class]);
 $router->get('/client/wearable/status',          [WearableController::class, 'status'],        [ClientMiddleware::class]);
 $router->delete('/client/wearable/disconnect',   [WearableController::class, 'disconnect'],    [ClientMiddleware::class]);
 $router->get('/client/wearable/fitbit/connect',  [WearableController::class, 'fitbitConnect'], [ClientMiddleware::class]);
@@ -381,35 +382,46 @@ $router->post('/staff/profile/photo',        [StaffController::class, 'uploadPro
 $router->delete('/staff/profile/photo',      [StaffController::class, 'deleteProfilePhoto'], [StaffMiddleware::class]);
 
 // ─── Sports-science Assessments (Feature 7) ──────────────────────────────────
-$router->post('/org/clients/:id/assessments',        [AssessmentController::class, 'store'],  [StaffMiddleware::class]);
-$router->get('/org/clients/:id/assessments',          [AssessmentController::class, 'index'],  [StaffMiddleware::class]);
-$router->get('/org/clients/:id/assessments/latest',   [AssessmentController::class, 'latest'], [StaffMiddleware::class]);
+// front_desk must not create/assess clinical assessments; restrict to
+// owner, admin, and instructor_coach. Reads are gated the same way for
+// consistency since assessments contain sensitive sports-science data.
+$router->post('/org/clients/:id/assessments',        [AssessmentController::class, 'store'],  [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
+$router->get('/org/clients/:id/assessments',          [AssessmentController::class, 'index'],  [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
+$router->get('/org/clients/:id/assessments/latest',   [AssessmentController::class, 'latest'], [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
 
 // ─── Studio Operations (Feature 9) ───────────────────────────────────────────
-$router->post('/org/classes',                 [StudioClassController::class, 'createClass'],  [StaffMiddleware::class]);
+// Studio class creation + staff-side bookings/checkin/membership management
+// are available to all active staff roles (owner, admin, manager,
+// front_desk) — front desk staff handle walk-in bookings and checkin.
+// Membership status changes and utilization reports are restricted to
+// owner/admin/manager since they affect billing and reporting.
+$router->post('/org/classes',                 [StudioClassController::class, 'createClass'],  [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'manager', 'front_desk'])]);
 $router->get('/org/classes',                  [StudioClassController::class, 'index'],        [StaffMiddleware::class]);
 $router->get('/client/classes',               [StudioClassController::class, 'indexForClient'],[ClientMiddleware::class]);
 $router->post('/client/classes/:id/book',     [StudioBookingController::class, 'bookAsClient'], [ClientMiddleware::class]);
-$router->post('/org/classes/:id/book',        [StudioBookingController::class, 'bookAsStaff'],  [StaffMiddleware::class]);
+$router->post('/org/classes/:id/book',        [StudioBookingController::class, 'bookAsStaff'],  [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'manager', 'front_desk'])]);
 $router->post('/client/bookings/:id/cancel',  [StudioBookingController::class, 'cancelAsClient'],[ClientMiddleware::class]);
-$router->post('/org/bookings/:id/cancel',     [StudioBookingController::class, 'cancelAsStaff'], [StaffMiddleware::class]);
-$router->post('/org/memberships',             [StudioMembershipController::class, 'createMembership'],       [StaffMiddleware::class]);
+$router->post('/org/bookings/:id/cancel',     [StudioBookingController::class, 'cancelAsStaff'], [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'manager', 'front_desk'])]);
+$router->post('/org/memberships',             [StudioMembershipController::class, 'createMembership'],       [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'manager'])]);
 $router->get('/org/memberships',              [StudioMembershipController::class, 'listMemberships'],        [StaffMiddleware::class]);
-$router->post('/org/memberships/:id/status',  [StudioMembershipController::class, 'updateMembershipStatus'],  [StaffMiddleware::class]);
+$router->post('/org/memberships/:id/status',  [StudioMembershipController::class, 'updateMembershipStatus'],  [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'manager'])]);
 $router->post('/client/consent-documents',    [StudioController::class, 'signConsentAsClient'],     [ClientMiddleware::class]);
-$router->post('/org/clients/:id/checkin',     [StudioController::class, 'checkinAsStaff'],  [StaffMiddleware::class]);
+$router->post('/org/clients/:id/checkin',     [StudioController::class, 'checkinAsStaff'],  [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'manager', 'front_desk'])]);
 $router->post('/client/checkin',              [StudioController::class, 'checkinAsClient'], [ClientMiddleware::class]);
-$router->get('/org/reports/utilization',      [StudioController::class, 'utilizationReport'],[StaffMiddleware::class]);
+$router->get('/org/reports/utilization',      [StudioController::class, 'utilizationReport'],[StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'manager'])]);
 
 // ─── Physiotherapy / Rehab Track (Feature 8) ─────────────────────────────────
+// Clinical rehab actions (start track, record PROMs, log pain as staff,
+// write SOAP notes) are restricted to owner/admin/instructor_coach —
+// front_desk does not handle clinical documentation.
 $router->post('/client/parq',                       [RehabController::class, 'submitParq'], [ClientMiddleware::class]);
-$router->get('/org/clients/:id/parq',                [RehabController::class, 'getParq'],    [StaffMiddleware::class]);
-$router->post('/org/clients/:id/rehab-track/start',  [RehabController::class, 'startTrack'], [StaffMiddleware::class]);
-$router->get('/org/clients/:id/rehab-track',         [RehabController::class, 'getTrack'],   [StaffMiddleware::class]);
-$router->post('/org/rehab-tracks/:id/proms',         [RehabController::class, 'recordProm'], [StaffMiddleware::class]);
-$router->post('/org/rehab-tracks/:id/pain-logs',     [RehabController::class, 'logPainAsStaff'],  [StaffMiddleware::class]);
+$router->get('/org/clients/:id/parq',                [RehabController::class, 'getParq'],    [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
+$router->post('/org/clients/:id/rehab-track/start',  [RehabController::class, 'startTrack'], [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
+$router->get('/org/clients/:id/rehab-track',         [RehabController::class, 'getTrack'],   [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
+$router->post('/org/rehab-tracks/:id/proms',         [RehabController::class, 'recordProm'], [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
+$router->post('/org/rehab-tracks/:id/pain-logs',     [RehabController::class, 'logPainAsStaff'],  [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
 $router->post('/client/rehab-tracks/:id/pain-logs',  [RehabController::class, 'logPainAsClient'], [ClientMiddleware::class]);
-$router->post('/org/rehab-tracks/:id/soap-notes',    [RehabController::class, 'addSoapNote'],   [StaffMiddleware::class]);
-$router->get('/org/rehab-tracks/:id/soap-notes',     [RehabController::class, 'listSoapNotes'], [StaffMiddleware::class]);
+$router->post('/org/rehab-tracks/:id/soap-notes',    [RehabController::class, 'addSoapNote'],   [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
+$router->get('/org/rehab-tracks/:id/soap-notes',     [RehabController::class, 'listSoapNotes'], [StaffMiddleware::class, new RoleGateMiddleware(['owner', 'admin', 'instructor_coach'])]);
 
 

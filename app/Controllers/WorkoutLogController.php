@@ -257,7 +257,31 @@ class WorkoutLogController
             }
         }
 
-        $result = array_map(function ($l) use ($mediaMap, $planMap) {
+        // Resolve reviewer (coach/staff) names for reviewed logs
+        $reviewerIds = [];
+        foreach ($logs as $l) {
+            if (!empty($l['reviewed_by'])) {
+                $reviewerIds[] = $l['reviewed_by'] instanceof ObjectId ? $l['reviewed_by'] : new ObjectId((string) $l['reviewed_by']);
+            }
+        }
+        $reviewerMap = [];
+        if (!empty($reviewerIds)) {
+            $reviewers = Database::collection('coaches')->find([
+                '_id' => ['$in' => $reviewerIds]
+            ])->toArray();
+            foreach ($reviewers as $r) {
+                $reviewerMap[(string) $r['_id']] = $r['name'] ?? $r['email'] ?? 'Unknown';
+            }
+            // Reviewer may also be a staff member
+            $staffReviewers = Database::collection('staff')->find([
+                '_id' => ['$in' => $reviewerIds]
+            ])->toArray();
+            foreach ($staffReviewers as $r) {
+                $reviewerMap[(string) $r['_id']] = $r['name'] ?? $r['email'] ?? 'Unknown';
+            }
+        }
+
+        $result = array_map(function ($l) use ($mediaMap, $planMap, $reviewerMap) {
             $logMedia = [];
             foreach ($l['media_uploads'] ?? [] as $mid) {
                 $midStr = (string) $mid;
@@ -279,17 +303,69 @@ class WorkoutLogController
                 }
             }
 
+            // Index planned exercises by normalized name for easy lookup
+            $planByName = [];
+            foreach ($plannedExercises as $pex) {
+                $name = strtolower(trim((string) ($pex['name'] ?? '')));
+                if ($name !== '') {
+                    $planByName[$name] = $pex;
+                }
+            }
+
+            // Enrich each logged exercise with planned set data
+            $enrichedExercises = [];
+            foreach ($l['exercises'] ?? [] as $ex) {
+                $exNameRaw = $ex['name'] ?? '';
+                $exNameKey = strtolower(trim((string) $exNameRaw));
+                $planned   = $planByName[$exNameKey] ?? null;
+
+                $setsCompleted = (array) ($ex['sets_completed'] ?? []);
+                $planSets      = isset($planned['sets']) ? (int) $planned['sets'] : count($setsCompleted);
+                $planKg        = isset($planned['kg']) ? (float) $planned['kg'] : null;
+                $planReps      = isset($planned['reps']) ? (string) $planned['reps'] : null;
+
+                $setComparison = [];
+                for ($i = 0; $i < max(count($setsCompleted), $planSets); $i++) {
+                    $actual = $setsCompleted[$i] ?? null;
+                    $setComparison[] = [
+                        'set_number'  => $actual['set_number'] ?? ($i + 1),
+                        'plan_kg'     => $planKg,
+                        'plan_reps'   => $planReps,
+                        'actual_kg'   => isset($actual['kg']) ? (float) $actual['kg'] : null,
+                        'actual_reps' => isset($actual['reps']) ? (int) $actual['reps'] : null,
+                    ];
+                }
+
+                $enrichedExercises[] = [
+                    'name'           => $exNameRaw,
+                    'plan_sets'      => $planSets,
+                    'plan_kg'        => $planKg,
+                    'plan_reps'      => $planReps,
+                    'rest_seconds'   => $planned['rest_seconds'] ?? null,
+                    'set_comparison' => $setComparison,
+                    'sets_completed' => $setsCompleted,
+                    'notes'          => $ex['notes'] ?? null,
+                ];
+            }
+
+            $reviewedById = isset($l['reviewed_by']) ? (string) $l['reviewed_by'] : null;
+
             return [
                 'id'              => (string) $l['_id'],
                 'workout_plan_id' => $planId,
                 'plan_title'      => $plan['title'] ?? null,
                 'day'             => $l['day'],
-                'exercises'       => $l['exercises'] ?? [],
+                'exercises'       => $enrichedExercises,
                 'planned_exercises' => $plannedExercises,
                 'notes'           => $l['notes'] ?? null,
+                'session_rpe'     => $l['session_rpe'] ?? null,
                 'completed_at'    => (string) ($l['completed_at'] ?? ''),
                 'media_count'     => count($logMedia),
                 'media'           => $logMedia,
+                'review_status'   => $l['review_status'] ?? 'pending',
+                'review_feedback' => $l['review_feedback'] ?? null,
+                'reviewed_at'     => isset($l['reviewed_at']) ? (string) $l['reviewed_at'] : null,
+                'reviewed_by'     => $reviewedById ? ($reviewerMap[$reviewedById] ?? 'Unknown') : null,
             ];
         }, $logs);
 
@@ -462,6 +538,18 @@ class WorkoutLogController
         $lastActivity = null;
         if ($latestLog) {
             $lastActivity = (string) ($latestLog['completed_at'] ?? '');
+
+            // Resolve reviewer name if present
+            $reviewedByName = null;
+            if (!empty($latestLog['reviewed_by'])) {
+                $reviewerId = $latestLog['reviewed_by'] instanceof ObjectId ? $latestLog['reviewed_by'] : new ObjectId((string) $latestLog['reviewed_by']);
+                $reviewer = Database::collection('coaches')->findOne(['_id' => $reviewerId], ['projection' => ['name' => 1, 'email' => 1]]);
+                if (!$reviewer) {
+                    $reviewer = Database::collection('staff')->findOne(['_id' => $reviewerId], ['projection' => ['name' => 1, 'email' => 1]]);
+                }
+                $reviewedByName = $reviewer['name'] ?? $reviewer['email'] ?? 'Unknown';
+            }
+
             $latestLogOut = [
                 'id'   => (string) $latestLog['_id'],
                 'day'  => $latestLog['day'] ?? '',
@@ -477,7 +565,13 @@ class WorkoutLogController
                         }, (array) ($ex['sets_completed'] ?? [])),
                     ];
                 }, (array) ($latestLog['exercises'] ?? [])),
-                'completed_at' => $lastActivity,
+                'notes'          => $latestLog['notes'] ?? null,
+                'session_rpe'    => $latestLog['session_rpe'] ?? null,
+                'completed_at'   => $lastActivity,
+                'review_status'  => $latestLog['review_status'] ?? 'pending',
+                'review_feedback'=> $latestLog['review_feedback'] ?? null,
+                'reviewed_at'    => isset($latestLog['reviewed_at']) ? (string) $latestLog['reviewed_at'] : null,
+                'reviewed_by'    => $reviewedByName,
             ];
         }
 

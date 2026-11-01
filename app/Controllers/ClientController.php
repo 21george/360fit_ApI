@@ -34,6 +34,39 @@ class ClientController
             }
         }
 
+        // Populate coach object for client-facing display
+        if (!empty($client['coach_id'])) {
+            $coach = Database::collection('coaches')->findOne(['_id' => $client['coach_id']]);
+            if ($coach) {
+                $data['coach'] = [
+                    'id'                => (string) $coach['_id'],
+                    'name'              => $coach['name'] ?? 'Coach',
+                    'email'             => $coach['email'] ?? null,
+                    'phone'             => $coach['phone'] ?? null,
+                    'profile_photo_url' => $coach['profile_photo_url'] ?? null,
+                    'specialty'         => $coach['specialty'] ?? null,
+                    'bio'               => $coach['bio'] ?? null,
+                ];
+            }
+        }
+
+        // Include active goals
+        $goals = Database::collection('goals')
+            ->find(['client_id' => $clientId, 'status' => 'active'], ['sort' => ['created_at' => -1]])
+            ->toArray();
+        $data['goals'] = array_map(fn($g) => [
+            'id'            => (string) $g['_id'],
+            'title'         => $g['title'] ?? '',
+            'target_value'  => $g['target_value'] ?? 0,
+            'current_value' => $g['current_value'] ?? 0,
+            'unit'          => $g['unit'] ?? '',
+            'deadline'      => isset($g['deadline']) ? (string) $g['deadline'] : null,
+            'status'        => $g['status'] ?? 'active',
+            'progress_pct'  => isset($g['target_value']) && $g['target_value'] > 0
+                ? min(100, round((($g['current_value'] ?? 0) / $g['target_value']) * 100))
+                : 0,
+        ], $goals);
+
         Response::success($data);
     }
 
@@ -874,6 +907,7 @@ class ClientController
         $out['is_blocked'] = $doc['is_blocked'] ?? false;
         $out['created_at'] = isset($doc['created_at']) ? (string) $doc['created_at'] : null;
         $out['updated_at'] = isset($doc['updated_at']) ? (string) $doc['updated_at'] : null;
+        $out['coach_id']   = isset($doc['coach_id']) ? (string) $doc['coach_id'] : null;
         $out['primary_staff_id']       = isset($doc['primary_staff_id']) ? (string) $doc['primary_staff_id'] : null;
         $out['last_staff_id']           = isset($doc['last_staff_id']) ? (string) $doc['last_staff_id'] : null;
         $out['last_staff_name']         = $doc['last_staff_name'] ?? null;

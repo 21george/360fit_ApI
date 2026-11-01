@@ -55,6 +55,81 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
+// ── Global rate limiting ───────────────────────────────────────────────
+// Applies a per-IP cap to ALL non-OPTIONS requests (auth endpoints get a
+// stricter per-route limit via AuthRateLimitMiddleware on top of this).
+// Health checks are exempt so monitoring never gets throttled.
+$__requestPath = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH) ?: '';
+$__isHealth    = str_ends_with($__requestPath, '/health');
+if (!$__isHealth) {
+    $__rlMax     = (int) ($_ENV['RATE_LIMIT_REQUESTS']  ?? 300);
+    $__rlWindow  = (int) ($_ENV['RATE_LIMIT_WINDOW']    ?? 900);
+    $__rlIp      = filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP) ?: '0.0.0.0';
+    $__rlTrusted = array_filter(
+        array_map('trim', explode(',', (string) ($_ENV['TRUSTED_PROXIES'] ?? ''))),
+        fn(string $ip): bool => filter_var($ip, FILTER_VALIDATE_IP) !== false
+    );
+    if (
+        $__rlIp !== '0.0.0.0'
+        && in_array($__rlIp, $__rlTrusted, true)
+        && !empty($_SERVER['HTTP_X_FORWARDED_FOR'])
+    ) {
+        $__fwd = array_map('trim', explode(',', (string) $_SERVER['HTTP_X_FORWARDED_FOR']));
+        $__fwdIp = filter_var(end($__fwd), FILTER_VALIDATE_IP);
+        if ($__fwdIp !== false) $__rlIp = $__fwdIp;
+    }
+    try {
+        $__rlCol = \App\Config\Database::collection('rate_limits');
+        $__rlKey = 'rate_limit:' . $__rlIp;
+        $__rlNow = time();
+        $__rlRec = $__rlCol->findOne(['key' => $__rlKey]);
+        if (!$__rlRec) {
+            $__rlCol->insertOne([
+                'key'          => $__rlKey,
+                'requests'     => 1,
+                'window_start' => $__rlNow,
+                'expires_at'   => new \MongoDB\BSON\UTCDateTime(($__rlNow + $__rlWindow) * 1000),
+            ]);
+        } elseif ($__rlNow - $__rlRec['window_start'] > $__rlWindow) {
+            $__rlCol->updateOne(['key' => $__rlKey], ['$set' => [
+                'requests'     => 1,
+                'window_start' => $__rlNow,
+                'expires_at'   => new \MongoDB\BSON\UTCDateTime(($__rlNow + $__rlWindow) * 1000),
+            ]]);
+        } elseif ($__rlRec['requests'] >= $__rlMax) {
+            http_response_code(429);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['success' => false, 'message' => 'Too many requests. Please try again later.']);
+            exit;
+        } else {
+            $__rlCol->updateOne(['key' => $__rlKey], ['$inc' => ['requests' => 1]]);
+        }
+    } catch (\Throwable $__rlErr) {
+        // If rate limiting fails (e.g. DB down), fail open — the request
+        // continues. The exception handler below will surface DB issues as 503.
+        error_log('[rate-limit] ' . $__rlErr->getMessage());
+    }
+}
+
+// ── Ensure MongoDB indexes on first request after deploy ───────────────
+// MongoIndexes::create() is idempotent — running it on every cold start
+// would be wasteful, so we gate it with a flag file that records the last
+// run. To force re-creation (e.g. after adding a new index), delete
+// `storage/.indexes_applied`. This guarantees the load-bearing
+// stripe_webhook_events.event_id unique index exists before any webhook
+// is processed.
+$__indexFlag = BASE_PATH . '/storage/.indexes_applied';
+if (!file_exists($__indexFlag)) {
+    try {
+        require_once BASE_PATH . '/app/Services/MongoIndexes.php';
+        (new \App\Services\MongoIndexes())->create();
+        @file_put_contents($__indexFlag, date('c'));
+        error_log('[indexes] MongoDB indexes ensured by bootstrap');
+    } catch (\Throwable $__idxErr) {
+        error_log('[indexes] Failed to ensure indexes: ' . $__idxErr->getMessage());
+    }
+}
+
 // Request correlation ID for tracing errors across logs and client reports
 $requestId = $_SERVER['HTTP_X_REQUEST_ID'] ?? bin2hex(random_bytes(8));
 Response::setRequestId($requestId);

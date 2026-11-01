@@ -98,6 +98,29 @@ class WearableController
         Response::success(['synced' => $upserted], "Synced {$upserted} day(s)");
     }
 
+    /**
+     * GET /client/wearable/data
+     *
+     * Returns the authenticated client's own wearable summaries.
+     * Query: from (YYYY-MM-DD), to (YYYY-MM-DD), default last 30 days.
+     */
+    public function clientSelfData(array $params): void
+    {
+        $clientId = new ObjectId($params['_auth']['sub']);
+
+        $from = Request::get('from') ?? date('Y-m-d', strtotime('-30 days'));
+        $to   = Request::get('to')   ?? date('Y-m-d');
+
+        $data = Database::collection('wearable_data')->find([
+            'client_id' => $clientId,
+            'date'      => ['$gte' => $from, '$lte' => $to],
+        ], ['sort' => ['date' => -1]])->toArray();
+
+        // Client can see all their own metrics
+        $allowed = $this->defaultSharingSettings();
+        Response::success(array_map(fn($d) => $this->formatWearable($d, $allowed), $data));
+    }
+
     // ─── Fitbit OAuth ────────────────────────────────────────────────────────────
 
     /**

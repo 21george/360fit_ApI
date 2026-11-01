@@ -614,50 +614,94 @@ class SubscriptionController
             Response::error('Webhook event ID missing', 400);
         }
 
-        $receipt = Database::collection('stripe_webhook_events')->updateOne(
-            ['event_id' => $eventId],
-            ['$setOnInsert' => [
-                'event_id' => $eventId,
-                'type' => $event['type'] ?? 'unknown',
-                'received_at' => new \MongoDB\BSON\UTCDateTime(),
-            ]],
-            ['upsert' => true]
+        // ── Idempotency: check whether this event has already been
+        //    processed. We record the receipt only AFTER successful
+        //    handling so that a post-receipt failure leaves the event
+        //    un-receipted and Stripe's retry can re-process it. A
+        //    `status` field tracks the lifecycle so partial work is
+        //    observable.
+        $existing = Database::collection('stripe_webhook_events')->findOne(
+            ['event_id' => $eventId]
         );
-        if ($receipt->getUpsertedCount() === 0) {
+        if ($existing && ($existing['status'] ?? '') === 'processed') {
             Response::success(null, 'Webhook already processed');
         }
 
+        // Reserve the event with status=processing so a concurrent
+        // delivery sees it as in-flight. If this insert races, the
+        // unique index on event_id makes one of the two fail — the
+        // loser returns "already processing" and Stripe retries later.
+        try {
+            Database::collection('stripe_webhook_events')->updateOne(
+                ['event_id' => $eventId],
+                ['$setOnInsert' => [
+                    'event_id'   => $eventId,
+                    'type'       => $event['type'] ?? 'unknown',
+                    'received_at'=> new \MongoDB\BSON\UTCDateTime(),
+                    'status'     => 'processing',
+                ]],
+                ['upsert' => true]
+            );
+        } catch (\MongoDB\Driver\Exception\BulkWriteException $e) {
+            // Duplicate key → another worker is already processing.
+            Response::success(null, 'Webhook already being processed');
+        }
+
         $type = $event['type'] ?? '';
-        $data = $event['data']['object'] ?? [];
+        $data = $event['data']['object'] ?? '';
+        if (!is_array($data)) {
+            $data = [];
+        }
 
-        switch ($type) {
-            case 'checkout.session.completed':
-                $this->handleCheckoutCompleted($data);
-                break;
+        $handlerError = null;
 
-            case 'customer.subscription.updated':
-                $this->handleSubscriptionUpdated($data);
-                break;
+        try {
+            switch ($type) {
+                case 'checkout.session.completed':
+                    $this->handleCheckoutCompleted($data);
+                    break;
 
-            case 'customer.subscription.deleted':
-                $this->handleSubscriptionDeleted($data);
-                break;
+                case 'customer.subscription.updated':
+                    $this->handleSubscriptionUpdated($data);
+                    break;
 
-            case 'customer.subscription.trial_will_end':
-                $this->handleTrialWillEnd($data);
-                break;
+                case 'customer.subscription.deleted':
+                    $this->handleSubscriptionDeleted($data);
+                    break;
 
-            case 'invoice.payment_succeeded':
-                $this->handleInvoicePaymentSucceeded($data);
-                break;
+                case 'customer.subscription.trial_will_end':
+                    $this->handleTrialWillEnd($data);
+                    break;
 
-            case 'invoice.payment_failed':
-                $this->handlePaymentFailed($data);
-                break;
+                case 'invoice.payment_succeeded':
+                    $this->handleInvoicePaymentSucceeded($data);
+                    break;
 
-            default:
-                error_log("[webhook] Unhandled Stripe event type: {$type}");
-                break;
+                case 'invoice.payment_failed':
+                    $this->handlePaymentFailed($data);
+                    break;
+
+                default:
+                    error_log("[webhook] Unhandled Stripe event type: {$type}");
+                    break;
+            }
+        } catch (\Throwable $e) {
+            $handlerError = $e;
+            error_log("[webhook] Handler failed for event {$eventId}: " . $e->getMessage());
+        }
+
+        // Mark processed on success, or failed on error (so Stripe retries).
+        Database::collection('stripe_webhook_events')->updateOne(
+            ['event_id' => $eventId],
+            ['$set' => [
+                'status'      => $handlerError ? 'failed' : 'processed',
+                'processed_at'=> new \MongoDB\BSON\UTCDateTime(),
+                'error'       => $handlerError ? $handlerError->getMessage() : null,
+            ]]
+        );
+
+        if ($handlerError) {
+            Response::error('Webhook handler failed', 500);
         }
 
         Response::success(null, 'Webhook processed');
@@ -1150,8 +1194,33 @@ class SubscriptionController
         $coach = Database::collection('coaches')->findOne(['_id' => $coachId]);
         if (!$coach) Response::error('Coach not found', 404);
 
+        $customerId = $coach['stripe_customer_id'] ?? null;
+        if (!$customerId) {
+            Response::error('No Stripe customer found for this account.', 400);
+        }
+
         try {
             $stripe = new StripeService();
+
+            // ── IDOR guard: verify the PaymentMethod belongs to this coach's
+            //    Stripe customer before detaching. Without this, a coach could
+            //    attempt to detach an arbitrary pm_* ID belonging to another
+            //    coach. Stripe would normally reject cross-customer detach,
+            //    but we enforce it server-side so the attempt never reaches
+            //    Stripe and the caller gets a clear 403.
+            $pms = $stripe->listPaymentMethods($customerId);
+            $ownedIds = array_column(
+                array_map(fn(array $pm): array => [
+                    'id'       => $pm['id'] ?? '',
+                    'customer' => $pm['customer'] ?? '',
+                ], $pms['data'] ?? []),
+                'id'
+            );
+
+            if (!in_array($pmId, $ownedIds, true)) {
+                Response::error('Payment method not found on this account.', 403);
+            }
+
             $stripe->detachPaymentMethod($pmId);
 
             // Clear default if it was the default method
